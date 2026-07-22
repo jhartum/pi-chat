@@ -36,6 +36,7 @@ import { createSecretRequest, tryDecryptSecret } from "./src/secrets.js";
 import {
 	ControlCoordinator,
 	getSessionRestartRequestFile,
+	isControlBusy,
 	sendRestartConfirmationAndShutdown,
 	writeSessionRestartRequest,
 } from "./src/session-restart.js";
@@ -731,8 +732,12 @@ export default function (pi: ExtensionAPI) {
 									});
 								});
 							};
-							if (chatTurnInFlight || !ctx.isIdle()) {
-								coordinator.request(runCompact, "normal");
+							if (isControlBusy(chatTurnInFlight, ctx.isIdle(), coordinator.hasPending)) {
+								const accepted = coordinator.request(runCompact, "normal");
+								if (!accepted) {
+									await liveConnection?.sendImmediate("A session restart is already pending. Unable to compact.");
+									return;
+								}
 								ctx.abort();
 								await liveConnection?.sendImmediate("Aborting current turn, then compacting.");
 								return;
@@ -766,8 +771,12 @@ export default function (pi: ExtensionAPI) {
 									() => ctx.shutdown(),
 								);
 							};
-							if (chatTurnInFlight || !ctx.isIdle()) {
-								coordinator.request(queueNewSession, "supervised-restart");
+							if (isControlBusy(chatTurnInFlight, ctx.isIdle(), coordinator.hasPending)) {
+								const accepted = coordinator.request(queueNewSession, "supervised-restart");
+								if (!accepted) {
+									await liveConnection?.sendImmediate("A session restart is already pending.");
+									return;
+								}
 								ctx.abort();
 								await liveConnection?.sendImmediate("Aborting current turn, then starting a new pi session.");
 								return;
@@ -1184,13 +1193,13 @@ export default function (pi: ExtensionAPI) {
 			const action = async () => {
 				await restartSandbox(ctx, conversationId);
 			};
-			if (chatTurnInFlight || !ctx.isIdle()) {
+			if (isControlBusy(chatTurnInFlight, ctx.isIdle(), coordinator.hasPending)) {
 				const accepted = coordinator.request(action, "normal");
-				ctx.abort();
 				if (!accepted) {
-					ctx.ui.notify("A session restart is already pending. Sandbox restart queued.", "warning");
+					ctx.ui.notify("A session restart is already pending.", "warning");
 					return;
 				}
+				ctx.abort();
 				ctx.ui.notify("Aborting current turn, then restarting sandbox.", "info");
 				return;
 			}

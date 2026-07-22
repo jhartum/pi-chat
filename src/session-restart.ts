@@ -236,6 +236,21 @@ export class ControlCoordinator {
 }
 
 /**
+ * Production busy predicate for deferring control actions while the agent
+ * is active or a coordinated action is pending/running.
+ *
+ * Used by index.ts to gate remote compact, remote new, and local sandbox
+ * restart against both agent activity AND coordinator state. Without the
+ * `hasPending` check, a compact command arriving during an agent_settled
+ * handler (where Pi has already cleared `_isAgentRunActive` and thus
+ * `ctx.isIdle()` returns true) would bypass the coordinator and execute
+ * directly while a restart was running.
+ */
+export function isControlBusy(chatTurnInFlight: boolean, isIdle: boolean, hasPending: boolean): boolean {
+	return chatTurnInFlight || !isIdle || hasPending;
+}
+
+/**
  * Attempts to send a restart confirmation notification (e.g. via the live
  * connection), then always invokes the shutdown callback — even when the send
  * operation rejects. If the send rejects, the error propagates to the caller

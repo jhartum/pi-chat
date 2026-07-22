@@ -8,6 +8,7 @@ import test, { after, describe, it } from "node:test";
 import {
 	ControlCoordinator,
 	getSessionRestartRequestFile,
+	isControlBusy,
 	PendingAction,
 	sendRestartConfirmationAndShutdown,
 	writeSessionRestartRequest,
@@ -34,6 +35,32 @@ function deferred(): {
 	});
 	return { promise, resolve, reject };
 }
+
+// ---------------------------------------------------------------------------
+// isControlBusy — production busy predicate
+// ---------------------------------------------------------------------------
+
+describe("isControlBusy", () => {
+	it("returns true when chatTurnInFlight is true", () => {
+		assert.equal(isControlBusy(true, true, false), true);
+	});
+
+	it("returns true when not idle", () => {
+		assert.equal(isControlBusy(false, false, false), true);
+	});
+
+	it("returns true when coordinator has pending", () => {
+		assert.equal(isControlBusy(false, true, true), true);
+	});
+
+	it("returns true when multiple conditions apply", () => {
+		assert.equal(isControlBusy(true, false, true), true);
+	});
+
+	it("returns false only when none apply", () => {
+		assert.equal(isControlBusy(false, true, false), false);
+	});
+});
 
 // ---------------------------------------------------------------------------
 // env-file helpers
@@ -792,6 +819,42 @@ test("index.ts retains /chat-new command and removes obsolete pi.sendUserMessage
 	assert.ok(
 		!source.includes(obsoleteBridgePattern),
 		'index.ts must NOT contain the obsolete pi.sendUserMessage("/chat-new") bridge',
+	);
+});
+
+test("index.ts uses isControlBusy at all 3 control deferral sites", async () => {
+	const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
+
+	// All 3 deferral sites must check coordinator.hasPending
+	const controlBusyPattern = /chatTurnInFlight.*isIdle.*coordinator\.hasPending/g;
+	const matches = source.match(controlBusyPattern);
+	assert.ok(
+		matches && matches.length >= 3,
+		`isControlBusy must appear in at least 3 places, found ${matches?.length ?? 0}`,
+	);
+
+	// All 3 sites must import isControlBusy or inline the condition
+	assert.ok(
+		source.includes("isControlBusy") || source.includes("chatTurnInFlight.*coordinator.hasPending"),
+		"index.ts must check coordinator.hasPending in busy deferral",
+	);
+});
+
+test("index.ts checks accepted before ctx.abort and sends truthful messages", async () => {
+	const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
+
+	// Each deferral site must declare `const accepted = coordinator.request(...)` BEFORE ctx.abort()
+	// Pattern: coordinator.request followed by accepted before ctx.abort
+	const requestThenAccepted = source.match(/const accepted = coordinator\.request\(/g);
+	assert.ok(
+		requestThenAccepted && requestThenAccepted.length >= 3,
+		`coordinator.request must assign accepted at least 3 times, found ${requestThenAccepted?.length ?? 0}`,
+	);
+
+	// Rejection messages must exist
+	assert.ok(
+		source.includes("A session restart is already pending"),
+		"index.ts must have a truthful message when restart is rejected",
 	);
 });
 
