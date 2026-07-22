@@ -62,6 +62,15 @@ pi -e /path/to/pi-chat
 
 To proxy only Telegram API and file requests, set `PI_CHAT_TELEGRAM_PROXY_URL`. Other host-side and Gondolin traffic remains direct.
 
+For a Telegram forum topic, add its Bot API thread ID to the configured channel. Incoming messages from other topics are ignored, and outbound messages are pinned to the selected topic:
+
+```json
+{
+  "id": "-1001669827300",
+  "telegramThreadId": "1"
+}
+```
+
 ---
 
 ## Commands

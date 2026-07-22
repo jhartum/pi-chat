@@ -26,6 +26,7 @@ export interface GondolinConfig {
 export interface ConfiguredChannel {
 	id: string;
 	name?: string;
+	telegramThreadId?: string;
 	dm?: boolean;
 	access?: AccessPolicy;
 	gondolin?: GondolinConfig;

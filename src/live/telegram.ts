@@ -4,6 +4,13 @@ import { chunkText } from "../render/chunking.js";
 import { formatMarkdownForService, maxMessageLength } from "../render/format.js";
 import { StreamingPreview } from "../render/streaming.js";
 import { telegramFetch } from "../telegram-http.js";
+import type { TelegramTarget } from "../telegram-target.js";
+import {
+	matchesTelegramTarget,
+	resolveTelegramTarget,
+	setTelegramThreadFormField,
+	withTelegramThread,
+} from "../telegram-target.js";
 import {
 	fetchBinary,
 	guessAttachmentKind,
@@ -49,6 +56,7 @@ interface TelegramAudio {
 }
 interface TelegramMessage {
 	message_id: number;
+	message_thread_id?: number;
 	media_group_id?: string;
 	chat: TelegramChat;
 	from?: TelegramUser;
@@ -107,9 +115,10 @@ async function downloadTelegramFile(
 async function messageToInput(
 	conversation: ResolvedConversation,
 	account: TelegramAccountConfig,
+	target: TelegramTarget,
 	message: TelegramMessage,
 ) {
-	if (String(message.chat.id) !== conversation.channel.id) return undefined;
+	if (!matchesTelegramTarget(target, message)) return undefined;
 	if (account.botUserId && String(message.from?.id ?? "") === account.botUserId) return undefined;
 	const text = (message.text || message.caption || "").trim();
 	const attachments: NonNullable<InboundMessageInput["attachments"]> = [];
@@ -182,6 +191,8 @@ export async function connectTelegramLive(
 	resumeState?: ResumeState,
 ): Promise<LiveConnection> {
 	const account = conversation.account as TelegramAccountConfig;
+	const target = resolveTelegramTarget(conversation.channel);
+	const threadBody = <T extends Record<string, unknown>>(body: T) => withTelegramThread(target, body);
 	let abort = false;
 	let offset = resumeState?.cursor ? Number(resumeState.cursor) + 1 : 0;
 	const pollController = new AbortController();
@@ -189,12 +200,16 @@ export async function connectTelegramLive(
 		create: async (text, parseMode, replyToMessageId) =>
 			String(
 				(
-					await callTelegram<{ message_id: number }>(account.botToken, "sendMessage", {
-						chat_id: Number(conversation.channel.id),
-						text,
-						parse_mode: parseMode,
-						reply_to_message_id: replyToMessageId ? Number(replyToMessageId) : undefined,
-					})
+					await callTelegram<{ message_id: number }>(
+						account.botToken,
+						"sendMessage",
+						threadBody({
+							chat_id: Number(conversation.channel.id),
+							text,
+							parse_mode: parseMode,
+							reply_to_message_id: replyToMessageId ? Number(replyToMessageId) : undefined,
+						}),
+					)
 				).message_id,
 			),
 		edit: async (id, text, parseMode) => {
@@ -240,7 +255,7 @@ export async function connectTelegramLive(
 		if (!state) return;
 		const merged = mergeMediaGroup(state.updates);
 		if (!merged) return;
-		const input = await messageToInput(conversation, account, merged);
+		const input = await messageToInput(conversation, account, target, merged);
 		if (!input) return;
 		const lastUpdateId = state.updates.at(-1)?.update_id;
 		await handlers.onMessage(input, {
@@ -255,17 +270,17 @@ export async function connectTelegramLive(
 			const message = update.message || update.edited_message;
 			if (!message) continue;
 			if (!message.media_group_id) {
-				const input = await messageToInput(conversation, account, message);
+				const input = await messageToInput(conversation, account, target, message);
 				if (input) await handlers.onMessage(input, { cursor: String(update.update_id), messageId: input.messageId });
 				continue;
 			}
-			const key = `${message.chat.id}:${message.media_group_id}`;
+			const key = `${message.chat.id}:${message.message_thread_id ?? ""}:${message.media_group_id}`;
 			grouped.set(key, [...(grouped.get(key) ?? []), update]);
 		}
 		for (const updates of grouped.values()) {
 			const merged = mergeMediaGroup(updates);
 			if (!merged) continue;
-			const input = await messageToInput(conversation, account, merged);
+			const input = await messageToInput(conversation, account, target, merged);
 			if (!input) continue;
 			await handlers.onMessage(input, {
 				cursor: String(updates.at(-1)?.update_id ?? 0),
@@ -294,7 +309,7 @@ export async function connectTelegramLive(
 					const message = update.message || update.edited_message;
 					if (!message) continue;
 					if (message.media_group_id) {
-						const key = `${message.chat.id}:${message.media_group_id}`;
+						const key = `${message.chat.id}:${message.message_thread_id ?? ""}:${message.media_group_id}`;
 						const existing = mediaGroups.get(key) ?? { updates: [] };
 						existing.updates.push(update);
 						if (existing.timer) clearTimeout(existing.timer);
@@ -302,7 +317,7 @@ export async function connectTelegramLive(
 						mediaGroups.set(key, existing);
 						continue;
 					}
-					const input = await messageToInput(conversation, account, message);
+					const input = await messageToInput(conversation, account, target, message);
 					if (input) await handlers.onMessage(input, { cursor: String(update.update_id), messageId: input.messageId });
 				}
 			} catch (error) {
@@ -324,11 +339,15 @@ export async function connectTelegramLive(
 		sendImmediate: async (text, replyToMessageId) =>
 			String(
 				(
-					await callTelegram<{ message_id: number }>(account.botToken, "sendMessage", {
-						chat_id: Number(conversation.channel.id),
-						text,
-						reply_to_message_id: replyToMessageId ? Number(replyToMessageId) : undefined,
-					})
+					await callTelegram<{ message_id: number }>(
+						account.botToken,
+						"sendMessage",
+						threadBody({
+							chat_id: Number(conversation.channel.id),
+							text,
+							reply_to_message_id: replyToMessageId ? Number(replyToMessageId) : undefined,
+						}),
+					)
 				).message_id,
 			),
 		send: async (text, attachmentPaths = [], signal, replyToMessageId) => {
@@ -343,12 +362,12 @@ export async function connectTelegramLive(
 							await callTelegram<{ message_id: number }>(
 								account.botToken,
 								"sendMessage",
-								{
+								threadBody({
 									chat_id: Number(conversation.channel.id),
 									text: chunks[i],
 									parse_mode: rendered.parseMode,
 									...(i === 0 ? replyParam : {}),
-								},
+								}),
 								{ signal },
 							)
 						).message_id,
@@ -364,6 +383,7 @@ export async function connectTelegramLive(
 			const firstField = firstKind === "image" ? "photo" : "document";
 			const firstForm = new FormData();
 			firstForm.set("chat_id", String(Number(conversation.channel.id)));
+			setTelegramThreadFormField(target, firstForm);
 			if (replyToMessageId) firstForm.set("reply_to_message_id", String(Number(replyToMessageId)));
 			if (text) firstForm.set("caption", text);
 			if (text && firstKind === "image") firstForm.set("parse_mode", "Markdown");
@@ -383,6 +403,7 @@ export async function connectTelegramLive(
 				const field = kind === "image" ? "photo" : "document";
 				const form = new FormData();
 				form.set("chat_id", String(Number(conversation.channel.id)));
+				setTelegramThreadFormField(target, form);
 				form.set(field, new Blob([Buffer.from(file.data)], { type: file.mimeType }), file.name);
 				const response = await telegramFetch(`https://api.telegram.org/bot${account.botToken}/${method}`, {
 					method: "POST",
@@ -396,10 +417,14 @@ export async function connectTelegramLive(
 			return String(firstData.result.message_id);
 		},
 		startTyping: async () => {
-			await callTelegram(account.botToken, "sendChatAction", {
-				chat_id: Number(conversation.channel.id),
-				action: "typing",
-			});
+			await callTelegram(
+				account.botToken,
+				"sendChatAction",
+				threadBody({
+					chat_id: Number(conversation.channel.id),
+					action: "typing",
+				}),
+			);
 		},
 		stopTyping: async () => {},
 		syncPreview: async (markdown, done = false) => preview.update(markdown, done),
