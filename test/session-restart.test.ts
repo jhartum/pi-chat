@@ -97,6 +97,22 @@ describe("writeSessionRestartRequest", () => {
 		// We assert at least owner rw and not world-readable
 		assert.ok((mode & 0o600) === 0o600, `expected 0o600, got ${mode.toString(8)}`);
 	});
+
+	it("handles concurrent writes to the same path", async () => {
+		const path = await tmpPath();
+		const count = 10;
+		const promises = Array.from({ length: count }, () => writeSessionRestartRequest(path));
+		await Promise.all(promises);
+
+		assert.equal(existsSync(path), true);
+		const content = readFileSync(path, "utf8");
+		assert.ok(content.includes("restart"));
+
+		const dir = path.substring(0, path.lastIndexOf("/"));
+		const entries = readdirSync(dir);
+		const tempFiles = entries.filter((e) => e.startsWith(".new-session.tmp"));
+		assert.deepEqual(tempFiles, []);
+	});
 });
 
 test("getSessionRestartRequestFile and writeSessionRestartRequest integrate", async () => {
