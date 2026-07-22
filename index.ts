@@ -33,6 +33,7 @@ import { connectLive } from "./src/live/index.js";
 import type { LiveConnection } from "./src/live/types.js";
 import { ConversationRuntime } from "./src/runtime.js";
 import { createSecretRequest, tryDecryptSecret } from "./src/secrets.js";
+import { getSessionRestartRequestFile, writeSessionRestartRequest } from "./src/session-restart.js";
 import { runChatConfigUI } from "./src/tui/chat-config.js";
 import { runWithLoader, selectItem, showNotice } from "./src/tui/dialogs.js";
 
@@ -445,6 +446,7 @@ export default function (pi: ExtensionAPI) {
 	let queuedOutboundAttachments: string[] = [];
 	let pendingChatDispatch = false;
 	let pendingControlAction: (() => Promise<void>) | undefined;
+	let shutdownRequested = false;
 	let activeTriggerMessageId: string | undefined;
 
 	function persistChatState(conversationId?: string): void {
@@ -732,9 +734,22 @@ export default function (pi: ExtensionAPI) {
 							return;
 						}
 						if (control === "new") {
+							const requestFile = getSessionRestartRequestFile();
+							if (!requestFile) {
+								await liveConnection?.sendImmediate("Remote new requires a supervised deployment.");
+								return;
+							}
 							const queueNewSession = async () => {
-								pi.sendUserMessage("/chat-new", { deliverAs: "followUp" });
+								try {
+									await writeSessionRestartRequest(requestFile);
+								} catch (error) {
+									const message = error instanceof Error ? error.message : String(error);
+									await liveConnection?.sendImmediate(`Failed to write session restart request: ${message}`);
+									return;
+								}
+								shutdownRequested = true;
 								await liveConnection?.sendImmediate("Starting a new pi session.");
+								ctx.shutdown();
 							};
 							if (chatTurnInFlight || !ctx.isIdle()) {
 								pendingControlAction = queueNewSession;
@@ -1073,7 +1088,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	async function tryDispatch(ctx: ExtensionContext): Promise<void> {
-		if (!runtime || chatTurnInFlight || !ctx.isIdle()) return;
+		if (!runtime || chatTurnInFlight || !ctx.isIdle() || shutdownRequested) return;
 		const next = runtime.beginNextJob();
 		if (!next) {
 			updateStatus(ctx);

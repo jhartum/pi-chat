@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, describe, it } from "node:test";
@@ -128,4 +128,21 @@ test("getSessionRestartRequestFile and writeSessionRestartRequest integrate", as
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+test("index.ts retains /chat-new command and removes obsolete pi.sendUserMessage bridge", async () => {
+	const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
+
+	// The local /chat-new command must still be registered
+	assert.ok(
+		source.includes('registerCommand("chat-new"'),
+		"index.ts must keep registerCommand(chat-new) for local /chat-new",
+	);
+
+	// The obsolete bridge that forwarded remote 'new' as a user message must be removed
+	const obsoleteBridgePattern = 'pi.sendUserMessage("/chat-new"';
+	assert.ok(
+		!source.includes(obsoleteBridgePattern),
+		'index.ts must NOT contain the obsolete pi.sendUserMessage("/chat-new") bridge; remote new now writes restart marker directly',
+	);
 });
