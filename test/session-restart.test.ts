@@ -14,7 +14,29 @@ import {
 } from "../src/session-restart.js";
 
 // ---------------------------------------------------------------------------
-// Utility: env-file helpers
+// Utility
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a {promise, resolve, reject} deferred control object.
+ * The promise stays pending until resolve/reject is called.
+ */
+function deferred(): {
+	promise: Promise<void>;
+	resolve: () => void;
+	reject: (err: unknown) => void;
+} {
+	let resolve!: () => void;
+	let reject!: (err: unknown) => void;
+	const promise = new Promise<void>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
+
+// ---------------------------------------------------------------------------
+// env-file helpers
 // ---------------------------------------------------------------------------
 
 describe("getSessionRestartRequestFile", () => {
@@ -53,7 +75,7 @@ describe("getSessionRestartRequestFile", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Utility: marker-file writing
+// marker-file writing
 // ---------------------------------------------------------------------------
 
 describe("writeSessionRestartRequest", () => {
@@ -105,10 +127,7 @@ describe("writeSessionRestartRequest", () => {
 		const path = await tmpPath();
 		await writeSessionRestartRequest(path);
 		const stats = statSync(path);
-		// mode is file permissions; mask out file type bits
 		const mode = stats.mode & 0o777;
-		// 0o600 on unix-like systems; on Windows the mode may differ
-		// We assert at least owner rw and not world-readable
 		assert.ok((mode & 0o600) === 0o600, `expected 0o600, got ${mode.toString(8)}`);
 	});
 
@@ -145,28 +164,88 @@ test("getSessionRestartRequestFile and writeSessionRestartRequest integrate", as
 });
 
 // ---------------------------------------------------------------------------
-// PendingAction — behavioral tests with deferred promises
+// PendingAction — behavioral tests
 // ---------------------------------------------------------------------------
 
-/**
- * Returns a {promise, resolve, reject} deferred control object.
- * The promise stays pending until resolve/reject is called.
- */
-function deferred(): {
-	promise: Promise<void>;
-	resolve: () => void;
-	reject: (err: unknown) => void;
-} {
-	let resolve!: () => void;
-	let reject!: (err: unknown) => void;
-	const promise = new Promise<void>((res, rej) => {
-		resolve = res;
-		reject = rej;
-	});
-	return { promise, resolve, reject };
-}
-
 describe("PendingAction", () => {
+	// --- Admission observability ---
+
+	it("set returns true when action is accepted (normal when idle)", () => {
+		const pa = new PendingAction();
+		const result = pa.set(async () => {}, "normal");
+		assert.equal(result, true);
+	});
+
+	it("set returns false when normal is rejected (restart queued)", () => {
+		const pa = new PendingAction();
+		pa.set(async () => {}, "supervised-restart");
+		const result = pa.set(async () => {
+			throw new Error("should not run");
+		}, "normal");
+		assert.equal(result, false, "normal must be rejected when restart is queued");
+	});
+
+	it("set returns false when normal is rejected (restart running)", async () => {
+		const pa = new PendingAction();
+		const d = deferred();
+
+		pa.set(async () => {
+			await d.promise;
+		}, "supervised-restart");
+
+		const drainPromise = pa.drain();
+		await new Promise((r) => setTimeout(r, 10));
+
+		const result = pa.set(async () => {
+			throw new Error("should not run");
+		}, "normal");
+
+		assert.equal(result, false, "normal must be rejected when restart is running");
+
+		d.resolve();
+		await drainPromise;
+	});
+
+	it("set returns true when restart replaces queued normal", () => {
+		const pa = new PendingAction();
+		pa.set(async () => {}, "normal");
+		const result = pa.set(async () => {}, "supervised-restart");
+		assert.equal(result, true, "restart must be accepted (replaces normal)");
+	});
+
+	it("set returns false when restart-while-restart-running", async () => {
+		const pa = new PendingAction();
+		const d = deferred();
+
+		pa.set(async () => {
+			await d.promise;
+		}, "supervised-restart");
+
+		const drainPromise = pa.drain();
+		await new Promise((r) => setTimeout(r, 10));
+
+		const result = pa.set(async () => {}, "supervised-restart");
+		assert.equal(result, false, "restart must be rejected when restart is already running");
+
+		d.resolve();
+		await drainPromise;
+	});
+
+	it("set returns true for ControlCoordinator.request", () => {
+		const cc = new ControlCoordinator();
+		const result = cc.request(async () => {}, "normal");
+		assert.equal(result, true, "ControlCoordinator.request must propagate acceptance");
+	});
+
+	it("set returns false for ControlCoordinator.request when rejected", () => {
+		const cc = new ControlCoordinator();
+		cc.request(async () => {}, "supervised-restart");
+		const result = cc.request(async () => {}, "normal");
+		assert.equal(result, false, "ControlCoordinator.request must propagate rejection");
+	});
+
+	// --- Running state tracking ---
+
 	it("hasPending is true while action is running (not just queued)", async () => {
 		const pa = new PendingAction();
 		const d = deferred();
@@ -177,7 +256,6 @@ describe("PendingAction", () => {
 			d.resolve();
 		});
 
-		// Drain starts, action runs, observes hasPending inside the action
 		const drainPromise = pa.drain();
 		await d.promise;
 
@@ -192,43 +270,30 @@ describe("PendingAction", () => {
 		pa.set(async () => {
 			throw new Error("should not run");
 		}, "normal");
-
-		// Only the restart should be queued
 		assert.equal(pa.hasPending, true);
-		// Verify the normal was dropped by draining — only restart runs
 	});
 
 	it("normal action rejected while restart is running", async () => {
 		const pa = new PendingAction();
 		const d = deferred();
-		let normalRejected = false;
 
-		// Queue a restart that blocks until we release it
 		pa.set(async () => {
 			await d.promise;
 		}, "supervised-restart");
 
-		// Start draining the restart
 		const drainPromise = pa.drain();
-
-		// While restart is running, try to queue a normal action
-		// We need to wait a tick to ensure drain has started
 		await new Promise((r) => setTimeout(r, 10));
 
-		// hasPending should still be true
 		assert.equal(pa.hasPending, true, "hasPending must be true while restart runs");
 
-		// Normal should be rejected
-		pa.set(async () => {
-			normalRejected = true;
-		}, "normal");
+		pa.set(async () => {}, "normal");
 
-		// Release the restart
 		d.resolve();
 		await drainPromise;
 
-		// Normal should not have run
-		assert.equal(normalRejected, false, "normal action must not run when restart is pending");
+		// hasPending should be false after normal drain completes
+		// (the normal was never queued so nothing extra to drain)
+		assert.equal(pa.hasPending, false);
 	});
 
 	it("restart replaces queued normal", async () => {
@@ -252,7 +317,6 @@ describe("PendingAction", () => {
 		const normalHeld = deferred();
 		const order: string[] = [];
 
-		// Normal action: blocks until released
 		pa.set(async () => {
 			order.push("normal-start");
 			normalStarted.resolve();
@@ -263,15 +327,12 @@ describe("PendingAction", () => {
 		const drainPromise = pa.drain();
 		await normalStarted.promise;
 
-		// While normal is running, queue a restart
 		pa.set(async () => {
 			order.push("restart-run");
 		}, "supervised-restart");
 
-		// hasPending should still be true
 		assert.equal(pa.hasPending, true);
 
-		// Release normal
 		normalHeld.resolve();
 		await drainPromise;
 
@@ -290,7 +351,6 @@ describe("PendingAction", () => {
 		}, "supervised-restart");
 
 		await pa.drain();
-		// Only the second restart runs
 		assert.equal(callCount, 1);
 	});
 
@@ -320,7 +380,6 @@ describe("PendingAction", () => {
 		const [r1, r2] = await Promise.all([pa.drain(), pa.drain()]);
 
 		assert.equal(callCount, 1, "action must execute exactly once");
-		// At least one drain should report didRun
 		assert.ok(r1 || r2, "one drain must report didRun=true");
 	});
 
@@ -337,6 +396,66 @@ describe("PendingAction", () => {
 		assert.equal(pa.hasPending, false);
 		assert.equal(await pa.drain(), false);
 	});
+
+	// --- Throw handling: drain continues for queued work ---
+
+	it("restart queued while normal throws executes restart in same drain cycle", async () => {
+		const pa = new PendingAction();
+		const normalStarted = deferred();
+		const beforeThrow = deferred();
+		const order: string[] = [];
+
+		// Normal action blocks at beforeThrow so test can queue restart while it's running
+		pa.set(async () => {
+			order.push("normal-start");
+			normalStarted.resolve();
+			await beforeThrow.promise;
+			order.push("normal-throw");
+			throw new Error("normal failure");
+		}, "normal");
+
+		const drainPromise = pa.drain();
+		await normalStarted.promise;
+
+		// Queue restart while normal is blocked at beforeThrow
+		pa.set(async () => {
+			order.push("restart-run");
+		}, "supervised-restart");
+
+		// Release normal so it throws
+		beforeThrow.resolve();
+
+		await assert.rejects(() => drainPromise, /normal failure/);
+
+		assert.deepEqual(
+			order,
+			["normal-start", "normal-throw", "restart-run"],
+			"restart must execute in same drain cycle even when normal throws",
+		);
+	});
+
+	it("concurrent drain calls: running action throws, no extra recovery at PA level", async () => {
+		const pa = new PendingAction();
+		const d = deferred();
+
+		pa.set(async () => {
+			await d.promise;
+			throw new Error("action failure");
+		});
+
+		// Start two concurrent drains
+		const [r1, r2] = await Promise.allSettled([
+			(async () => {
+				d.resolve(); // let the action start failing
+				return pa.drain();
+			})(),
+			pa.drain(),
+		]);
+
+		// At least one rejects with the action error
+		const rejections = [r1, r2].filter((r) => r.status === "rejected");
+		assert.ok(rejections.length >= 1, "at least one drain must propagate the error");
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -348,9 +467,7 @@ describe("ControlCoordinator.drainAndRecover", () => {
 		const cc = new ControlCoordinator();
 		let recovered = false;
 
-		cc.request(async () => {
-			// normal completion, no shutdown
-		}, "normal");
+		cc.request(async () => {}, "normal");
 
 		await cc.drainAndRecover(async () => {
 			recovered = true;
@@ -402,7 +519,6 @@ describe("ControlCoordinator.drainAndRecover", () => {
 		let caught: unknown;
 
 		cc.request(async () => {
-			// Marker write succeeded, confirmation send throws
 			cc.shutdownRequested = true;
 			throw new Error("confirmation send failure");
 		}, "supervised-restart");
@@ -444,10 +560,8 @@ describe("ControlCoordinator.drainAndRecover", () => {
 			await d.promise;
 		}, "supervised-restart");
 
-		// Start drain (action runs async)
 		const drainPromise = cc.drain();
 
-		// While restart is running, hasPending is true
 		assert.equal(cc.hasPending, true, "hasPending must be true while restart runs");
 
 		d.resolve();
@@ -461,45 +575,155 @@ describe("ControlCoordinator.drainAndRecover", () => {
 		const normalHeld = deferred();
 		const order: string[] = [];
 
-		// Queue a normal action that blocks
 		cc.request(async () => {
 			order.push("normal");
 			await normalHeld.promise;
 		}, "normal");
 
-		// Start draining
 		const drainPromise = cc.drainAndRecover(async () => {
 			order.push("recover");
 		});
 
-		// Wait for normal to start running
 		await new Promise((r) => setTimeout(r, 10));
 
-		// Queue a restart while normal is running
 		cc.request(async () => {
 			order.push("restart");
 		}, "supervised-restart");
 
-		// Release normal
 		normalHeld.resolve();
 		await drainPromise;
 
-		// restart must run before recovery (dispatch is suppressed)
 		assert.deepEqual(order, ["normal", "restart", "recover"], "restart must run before recovery");
 	});
 
 	it("concurrent drainAndRecover calls do not double-dispatch", async () => {
 		const cc = new ControlCoordinator();
-		let callCount = 0;
+		let actionCount = 0;
 
 		cc.request(async () => {
-			callCount++;
+			actionCount++;
 		}, "supervised-restart");
 
-		// Two concurrent drains — only one should execute the action
 		await Promise.all([cc.drainAndRecover(async () => {}), cc.drainAndRecover(async () => {})]);
 
-		assert.equal(callCount, 1, "action must execute exactly once across concurrent drains");
+		assert.equal(actionCount, 1, "action must execute exactly once across concurrent drains");
+	});
+
+	it("concurrent drainAndRecover calls recovery exactly once", async () => {
+		const cc = new ControlCoordinator();
+		const barrier = deferred();
+		let recoverCount = 0;
+
+		// Queue an action that blocks until we release the barrier
+		cc.request(async () => {
+			await barrier.promise;
+		}, "normal");
+
+		// Start two concurrent drains
+		const drainPromises = Promise.allSettled([
+			cc.drainAndRecover(async () => {
+				recoverCount++;
+			}),
+			cc.drainAndRecover(async () => {
+				recoverCount++;
+			}),
+		]);
+
+		// Let both drains enter pending.drain() before releasing the barrier
+		await new Promise((r) => setTimeout(r, 20));
+
+		// Release barrier so the action (and thus drain #1) can complete
+		barrier.resolve();
+
+		await drainPromises;
+
+		// Recovery must be called exactly once, not twice
+		assert.equal(recoverCount, 1, "recover must be called exactly once across concurrent drains");
+	});
+
+	// --- Throw handling with chained restart ---
+
+	it("restart queued while normal throws runs restart then recovery", async () => {
+		const cc = new ControlCoordinator();
+		const normalStarted = deferred();
+		const beforeThrow = deferred();
+		const order: string[] = [];
+		let recovered = false;
+
+		// Normal blocks at beforeThrow so test can queue restart while it runs
+		cc.request(async () => {
+			order.push("normal-start");
+			normalStarted.resolve();
+			await beforeThrow.promise;
+			order.push("normal-throw");
+			throw new Error("normal failure");
+		}, "normal");
+
+		const darPromise = cc.drainAndRecover(async () => {
+			order.push("recover");
+			recovered = true;
+		});
+
+		await normalStarted.promise;
+
+		// Queue restart while normal is blocked at beforeThrow
+		cc.request(async () => {
+			order.push("restart-run");
+		}, "supervised-restart");
+
+		// Release normal so it throws — then restart should run, then recovery
+		beforeThrow.resolve();
+
+		await assert.rejects(() => darPromise, /normal failure/);
+
+		assert.deepEqual(
+			order,
+			["normal-start", "normal-throw", "restart-run", "recover"],
+			"restart must run after normal throws, then recovery",
+		);
+		assert.equal(recovered, true, "recovery must run (no shutdown was set)");
+	});
+
+	it("restart queued while normal throws with shutdown suppresses recovery", async () => {
+		const cc = new ControlCoordinator();
+		const normalStarted = deferred();
+		const beforeThrow = deferred();
+		const order: string[] = [];
+		let recovered = false;
+
+		// Normal blocks at beforeThrow so test can queue restart while it runs
+		cc.request(async () => {
+			order.push("normal-start");
+			normalStarted.resolve();
+			await beforeThrow.promise;
+			order.push("normal-throw");
+			throw new Error("normal failure");
+		}, "normal");
+
+		const darPromise = cc.drainAndRecover(async () => {
+			order.push("recover");
+			recovered = true;
+		});
+
+		await normalStarted.promise;
+
+		// Queue restart that sets shutdown while normal is blocked
+		cc.request(async () => {
+			order.push("restart-shutdown");
+			cc.shutdownRequested = true;
+		}, "supervised-restart");
+
+		// Release normal so it throws — then restart should run, recovery suppressed
+		beforeThrow.resolve();
+
+		await assert.rejects(() => darPromise, /normal failure/);
+
+		assert.deepEqual(
+			order,
+			["normal-start", "normal-throw", "restart-shutdown"],
+			"restart must run after normal throws, recovery suppressed",
+		);
+		assert.equal(recovered, false, "recovery must NOT run (shutdown was requested)");
 	});
 });
 
@@ -556,63 +780,49 @@ describe("sendRestartConfirmationAndShutdown", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Integration: /chat-new command and wiring tests
+// Integration: wiring tests
 // ---------------------------------------------------------------------------
 
 test("index.ts retains /chat-new command and removes obsolete pi.sendUserMessage bridge", async () => {
 	const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
 
-	// The local /chat-new command must still be registered
-	assert.ok(
-		source.includes('registerCommand("chat-new"'),
-		"index.ts must keep registerCommand(chat-new) for local /chat-new",
-	);
+	assert.ok(source.includes('registerCommand("chat-new"'), "index.ts must keep registerCommand(chat-new)");
 
-	// The obsolete bridge that forwarded remote 'new' as a user message must be removed
 	const obsoleteBridgePattern = 'pi.sendUserMessage("/chat-new"';
 	assert.ok(
 		!source.includes(obsoleteBridgePattern),
-		'index.ts must NOT contain the obsolete pi.sendUserMessage("/chat-new") bridge; remote new now writes restart marker directly',
+		'index.ts must NOT contain the obsolete pi.sendUserMessage("/chat-new") bridge',
 	);
 });
 
 test("index.ts uses drainAndRecover at all 3 lifecycle sites", async () => {
 	const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
 
-	// Must use drainAndRecover in the lifecycle paths
 	const drainAndRecoverCalls = source.match(/coordinator\.drainAndRecover\(/g);
 	assert.ok(
 		drainAndRecoverCalls && drainAndRecoverCalls.length >= 3,
 		`coordinator.drainAndRecover() must appear in at least 3 places, found ${drainAndRecoverCalls?.length ?? 0}`,
 	);
 
-	// Must NOT use raw coordinator.drain() in lifecycle handlers (agent_end, agent_settled)
-	// drain() might still exist as a public method but shouldn't be called from lifecycle
 	const rawDrainInLifecycle = source.match(/agent_(?:end|settled)[\s\S]*?coordinator\.drain\(\)/);
 	assert.ok(!rawDrainInLifecycle, "coordinator.drain() must not be called directly in lifecycle handlers");
 
-	// Restart uses supervised-restart priority
 	assert.ok(
 		source.includes('coordinator.request(queueNewSession, "supervised-restart"'),
 		"remote new must use supervised-restart priority",
 	);
 
-	// Compact and sandbox-restart use normal priority
 	assert.ok(source.includes('coordinator.request(runCompact, "normal"'), "compact must use normal priority");
 	assert.ok(
 		source.includes('coordinator.request(action, "normal"'),
 		"chat-config sandbox restart must use normal priority",
 	);
 
-	// tryDispatch must be guarded by coordinator.hasPending
 	assert.ok(
 		source.includes("coordinator.hasPending") && source.includes("async function tryDispatch"),
 		"tryDispatch must return when coordinator.hasPending is true",
 	);
 
-	// shutdownRequested must be on coordinator
 	assert.ok(source.includes("coordinator.shutdownRequested"), "shutdownRequested must be accessed through coordinator");
-
-	// agent_settled handler must exist
 	assert.ok(source.includes("agent_settled"), "agent_settled handler must be registered");
 });

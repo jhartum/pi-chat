@@ -25,6 +25,11 @@ export interface DrainResult {
  *
  * When a higher-priority action is queued while a lower-priority action is
  * running, it runs next in the same drain cycle (serialized, not concurrent).
+ *
+ * If a running action throws, the drain loop continues to process any work
+ * queued during its execution before propagating the original error. This
+ * guarantees that a restart queued while a normal action is running executes
+ * even when the normal action throws.
  */
 export class PendingAction {
 	private queuedAction: (() => Promise<void>) | undefined;
@@ -42,25 +47,28 @@ export class PendingAction {
 	 * - `normal` replaces a queued normal action.
 	 * - If a different-priority action is running, the newly queued action
 	 *   runs next in the same drain cycle.
+	 *
+	 * @returns true when the action was accepted, false when rejected.
 	 */
-	set(fn: () => Promise<void>, priority: ActionPriority = "normal"): void {
+	set(fn: () => Promise<void>, priority: ActionPriority = "normal"): boolean {
 		// Restart priority handling
 		if (priority === "supervised-restart") {
 			// If a restart is already running, silently drop (at most one effective restart)
-			if (this.runningPriority === "supervised-restart") return;
+			if (this.runningPriority === "supervised-restart") return false;
 
 			// Replace whatever is queued
 			this.queuedAction = fn;
 			this.queuedPriority = priority;
-			return;
+			return true;
 		}
 
 		// Normal priority: rejected if restart is queued OR running
-		if (this.runningPriority === "supervised-restart" || this.queuedPriority === "supervised-restart") return;
+		if (this.runningPriority === "supervised-restart" || this.queuedPriority === "supervised-restart") return false;
 
 		// Normal replaces queued normal (or queues behind a running normal)
 		this.queuedAction = fn;
 		this.queuedPriority = priority;
+		return true;
 	}
 
 	/**
@@ -68,10 +76,15 @@ export class PendingAction {
 	 * while a lower-priority action was running (via `set` during `await`),
 	 * it runs next in the same drain cycle.
 	 *
-	 * Returns true when at least one action executed.
+	 * If a running action throws, the loop continues to process any work
+	 * queued during its execution. The first error encountered is recorded
+	 * and rethrown after all queued work has been processed.
+	 *
+	 * Returns true when at least one action was attempted/executed.
 	 */
 	async drain(): Promise<boolean> {
 		let didRun = false;
+		let firstError: unknown;
 
 		while (this.queuedAction !== undefined) {
 			// If an action is already running (concurrent drain call), break
@@ -88,11 +101,19 @@ export class PendingAction {
 			try {
 				await fn();
 				didRun = true;
+			} catch (e) {
+				didRun = true;
+				if (firstError === undefined) firstError = e;
+				// Continue loop to process any work queued during the action's execution.
+				// This guarantees a restart queued while normal was running still executes.
 			} finally {
 				this.runningAction = undefined;
 				this.runningPriority = "normal";
 			}
 		}
+
+		// Rethrow the first error after all queued work has been processed
+		if (firstError !== undefined) throw firstError;
 
 		return didRun;
 	}
@@ -127,6 +148,10 @@ export class PendingAction {
  * agent_settled, ensuring that recovery dispatch runs exactly once after a
  * no-shutdown drain and is fully suppressed when shutdown was requested —
  * even when the action throws.
+ *
+ * Concurrent drainAndRecover calls are coalesced: only the call that
+ * performs the actual drain work runs recovery. A concurrent call that
+ * finds an action already running skips recovery entirely.
  */
 export class ControlCoordinator {
 	private readonly pending = new PendingAction();
@@ -144,9 +169,12 @@ export class ControlCoordinator {
 		return this.pending.hasPending;
 	}
 
-	/** Request a control action with the given priority. */
-	request(fn: () => Promise<void>, priority: ActionPriority = "normal"): void {
-		this.pending.set(fn, priority);
+	/**
+	 * Request a control action with the given priority.
+	 * @returns true when the action was accepted, false when rejected.
+	 */
+	request(fn: () => Promise<void>, priority: ActionPriority = "normal"): boolean {
+		return this.pending.set(fn, priority);
 	}
 
 	/**
@@ -161,26 +189,34 @@ export class ControlCoordinator {
 	/**
 	 * Drain pending actions and conditionally run the recovery callback.
 	 *
-	 * Recovery is invoked exactly when no shutdown was requested:
+	 * Recovery is invoked exactly when no shutdown was requested AND this
+	 * call was the one that performed actual drain work:
 	 * - After a normal (non-shutdown) action completes
 	 * - Even when an action throws, as long as shutdown was not set
 	 *
-	 * Recovery is suppressed when shutdown was requested (restart marker
-	 * written successfully), regardless of whether the action subsequently
-	 * threw.
+	 * Recovery is suppressed when:
+	 * - Shutdown was requested (restart marker written successfully)
+	 * - A concurrent drainAndRecover already handled the work
+	 *   (this call found nothing to drain)
 	 *
 	 * If the action threw, the original error is rethrown after recovery.
 	 */
 	async drainAndRecover(recover: () => Promise<void>): Promise<void> {
 		let actionError: unknown;
+		let didWork = false;
+
 		try {
-			await this.pending.drain();
+			const didRun = await this.pending.drain();
+			didWork = didRun;
 		} catch (e) {
+			// We caught an error from the drain — we were the active drain
+			didWork = true;
 			actionError = e;
 		}
 
-		// Recovery runs iff no shutdown was requested — even on error
-		if (!this._shutdownRequested) {
+		// Only recover if WE did the drain work. Concurrent drains that
+		// found nothing to execute skip recovery.
+		if (didWork && !this._shutdownRequested) {
 			try {
 				await recover();
 			} catch (recoverError) {

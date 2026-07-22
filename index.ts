@@ -1185,8 +1185,12 @@ export default function (pi: ExtensionAPI) {
 				await restartSandbox(ctx, conversationId);
 			};
 			if (chatTurnInFlight || !ctx.isIdle()) {
-				coordinator.request(action, "normal");
+				const accepted = coordinator.request(action, "normal");
 				ctx.abort();
+				if (!accepted) {
+					ctx.ui.notify("A session restart is already pending. Sandbox restart queued.", "warning");
+					return;
+				}
 				ctx.ui.notify("Aborting current turn, then restarting sandbox.", "info");
 				return;
 			}
