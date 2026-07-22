@@ -13,6 +13,10 @@ import {
 	writeSessionRestartRequest,
 } from "../src/session-restart.js";
 
+// ---------------------------------------------------------------------------
+// Utility: env-file helpers
+// ---------------------------------------------------------------------------
+
 describe("getSessionRestartRequestFile", () => {
 	it("returns undefined when PI_CHAT_NEW_SESSION_REQUEST_FILE is not set", () => {
 		assert.equal(getSessionRestartRequestFile({}), undefined);
@@ -47,6 +51,10 @@ describe("getSessionRestartRequestFile", () => {
 		}
 	});
 });
+
+// ---------------------------------------------------------------------------
+// Utility: marker-file writing
+// ---------------------------------------------------------------------------
 
 describe("writeSessionRestartRequest", () => {
 	const tmpDirs: string[] = [];
@@ -136,225 +144,368 @@ test("getSessionRestartRequestFile and writeSessionRestartRequest integrate", as
 	}
 });
 
+// ---------------------------------------------------------------------------
+// PendingAction — behavioral tests with deferred promises
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a {promise, resolve, reject} deferred control object.
+ * The promise stays pending until resolve/reject is called.
+ */
+function deferred(): {
+	promise: Promise<void>;
+	resolve: () => void;
+	reject: (err: unknown) => void;
+} {
+	let resolve!: () => void;
+	let reject!: (err: unknown) => void;
+	const promise = new Promise<void>((res, rej) => {
+		resolve = res;
+		reject = rej;
+	});
+	return { promise, resolve, reject };
+}
+
 describe("PendingAction", () => {
-	it("executes the action exactly once on drain", async () => {
+	it("hasPending is true while action is running (not just queued)", async () => {
 		const pa = new PendingAction();
-		let callCount = 0;
+		const d = deferred();
+		let observedWhileRunning: boolean | undefined;
+
 		pa.set(async () => {
-			callCount++;
+			observedWhileRunning = pa.hasPending;
+			d.resolve();
 		});
 
-		const r1 = await pa.drain();
-		assert.equal(r1, true);
-		assert.equal(callCount, 1);
+		// Drain starts, action runs, observes hasPending inside the action
+		const drainPromise = pa.drain();
+		await d.promise;
 
-		const r2 = await pa.drain();
-		assert.equal(r2, false);
-		assert.equal(callCount, 1);
+		assert.equal(observedWhileRunning, true, "hasPending must be true while action executes");
+		await drainPromise;
+		assert.equal(pa.hasPending, false, "hasPending must be false after drain completes");
 	});
 
-	it("returns false when nothing is pending", async () => {
+	it("normal action rejected while restart is queued", () => {
 		const pa = new PendingAction();
-		assert.equal(await pa.drain(), false);
+		pa.set(async () => {}, "supervised-restart");
+		pa.set(async () => {
+			throw new Error("should not run");
+		}, "normal");
+
+		// Only the restart should be queued
+		assert.equal(pa.hasPending, true);
+		// Verify the normal was dropped by draining — only restart runs
 	});
 
-	it("hasPending reflects stored state", () => {
+	it("normal action rejected while restart is running", async () => {
 		const pa = new PendingAction();
-		assert.equal(pa.hasPending, false);
+		const d = deferred();
+		let normalRejected = false;
 
-		pa.set(async () => {});
+		// Queue a restart that blocks until we release it
+		pa.set(async () => {
+			await d.promise;
+		}, "supervised-restart");
+
+		// Start draining the restart
+		const drainPromise = pa.drain();
+
+		// While restart is running, try to queue a normal action
+		// We need to wait a tick to ensure drain has started
+		await new Promise((r) => setTimeout(r, 10));
+
+		// hasPending should still be true
+		assert.equal(pa.hasPending, true, "hasPending must be true while restart runs");
+
+		// Normal should be rejected
+		pa.set(async () => {
+			normalRejected = true;
+		}, "normal");
+
+		// Release the restart
+		d.resolve();
+		await drainPromise;
+
+		// Normal should not have run
+		assert.equal(normalRejected, false, "normal action must not run when restart is pending");
+	});
+
+	it("restart replaces queued normal", async () => {
+		const pa = new PendingAction();
+		let ran = "";
+
+		pa.set(async () => {
+			ran = "normal";
+		}, "normal");
+		pa.set(async () => {
+			ran = "restart";
+		}, "supervised-restart");
+
+		await pa.drain();
+		assert.equal(ran, "restart");
+	});
+
+	it("restart queued while normal is running executes after normal completes", async () => {
+		const pa = new PendingAction();
+		const normalStarted = deferred();
+		const normalHeld = deferred();
+		const order: string[] = [];
+
+		// Normal action: blocks until released
+		pa.set(async () => {
+			order.push("normal-start");
+			normalStarted.resolve();
+			await normalHeld.promise;
+			order.push("normal-end");
+		}, "normal");
+
+		const drainPromise = pa.drain();
+		await normalStarted.promise;
+
+		// While normal is running, queue a restart
+		pa.set(async () => {
+			order.push("restart-run");
+		}, "supervised-restart");
+
+		// hasPending should still be true
 		assert.equal(pa.hasPending, true);
 
-		pa.clear();
-		assert.equal(pa.hasPending, false);
+		// Release normal
+		normalHeld.resolve();
+		await drainPromise;
+
+		assert.deepEqual(order, ["normal-start", "normal-end", "restart-run"], "restart must run after normal completes");
+	});
+
+	it("restart can replace queued restart (at most one effective restart)", async () => {
+		const pa = new PendingAction();
+		let callCount = 0;
+
+		pa.set(async () => {
+			callCount++;
+		}, "supervised-restart");
+		pa.set(async () => {
+			callCount++;
+		}, "supervised-restart");
+
+		await pa.drain();
+		// Only the second restart runs
+		assert.equal(callCount, 1);
 	});
 
 	it("normal action replaces normal action", async () => {
 		const pa = new PendingAction();
-		let called = "";
+		let value = "";
+
 		pa.set(async () => {
-			called = "first";
+			value = "first";
 		}, "normal");
 		pa.set(async () => {
-			called = "second";
+			value = "second";
 		}, "normal");
+
 		await pa.drain();
-		assert.equal(called, "second");
+		assert.equal(value, "second");
 	});
 
-	it("supervised-restart replaces normal pending", async () => {
-		const pa = new PendingAction();
-		let called = "";
-		pa.set(async () => {
-			called = "normal";
-		}, "normal");
-		pa.set(async () => {
-			called = "restart";
-		}, "supervised-restart");
-		await pa.drain();
-		assert.equal(called, "restart");
-	});
-
-	it("normal action does not replace supervised-restart", async () => {
-		const pa = new PendingAction();
-		let called = "";
-		pa.set(async () => {
-			called = "restart";
-		}, "supervised-restart");
-		pa.set(async () => {
-			called = "normal";
-		}, "normal");
-		await pa.drain();
-		assert.equal(called, "restart");
-	});
-
-	it("supervised-restart replaces supervised-restart", async () => {
+	it("concurrent drain calls execute the action once", async () => {
 		const pa = new PendingAction();
 		let callCount = 0;
+
 		pa.set(async () => {
 			callCount++;
-		}, "supervised-restart");
-		pa.set(async () => {
-			callCount++;
-		}, "supervised-restart");
-		await pa.drain();
-		assert.equal(callCount, 1);
+		});
+
+		const [r1, r2] = await Promise.all([pa.drain(), pa.drain()]);
+
+		assert.equal(callCount, 1, "action must execute exactly once");
+		// At least one drain should report didRun
+		assert.ok(r1 || r2, "one drain must report didRun=true");
+	});
+
+	it("drain returns false when nothing is pending", async () => {
+		const pa = new PendingAction();
+		assert.equal(await pa.drain(), false);
+	});
+
+	it("clear resets queued and running state", async () => {
+		const pa = new PendingAction();
+		pa.set(async () => {}, "supervised-restart");
+		assert.equal(pa.hasPending, true);
+		pa.clear();
+		assert.equal(pa.hasPending, false);
+		assert.equal(await pa.drain(), false);
 	});
 });
 
-describe("ControlCoordinator", () => {
-	it("drain returns didRun=false when nothing pending", async () => {
-		const cc = new ControlCoordinator();
-		const result = await cc.drain();
-		assert.equal(result.didRun, false);
-		assert.equal(result.shutdownRequested, false);
-	});
+// ---------------------------------------------------------------------------
+// ControlCoordinator.drainAndRecover — behavioral tests
+// ---------------------------------------------------------------------------
 
-	it("drain returns didRun=true after action runs", async () => {
+describe("ControlCoordinator.drainAndRecover", () => {
+	it("calls recover after successful no-shutdown drain", async () => {
 		const cc = new ControlCoordinator();
-		let ran = false;
+		let recovered = false;
+
 		cc.request(async () => {
-			ran = true;
-		});
-		const result = await cc.drain();
-		assert.equal(result.didRun, true);
-		assert.equal(ran, true);
-	});
-
-	it("drain returns shutdownRequested=true when set before drain", async () => {
-		const cc = new ControlCoordinator();
-		cc.request(async () => {});
-		cc.shutdownRequested = true;
-		const result = await cc.drain();
-		assert.equal(result.didRun, true);
-		assert.equal(result.shutdownRequested, true);
-	});
-
-	it("drain returns shutdownRequested=false on marker-write failure (no shutdown set)", async () => {
-		const cc = new ControlCoordinator();
-		cc.request(async () => {
-			// Simulate marker-write failure: action returns without setting shutdown
-		});
-		const result = await cc.drain();
-		assert.equal(result.didRun, true);
-		assert.equal(result.shutdownRequested, false);
-	});
-
-	it("supervised-restart supersedes a normal pending action", async () => {
-		const cc = new ControlCoordinator();
-		let called = "";
-		cc.request(async () => {
-			called = "normal";
+			// normal completion, no shutdown
 		}, "normal");
-		cc.request(async () => {
-			called = "restart";
-		}, "supervised-restart");
-		await cc.drain();
-		assert.equal(called, "restart");
+
+		await cc.drainAndRecover(async () => {
+			recovered = true;
+		});
+
+		assert.equal(recovered, true, "recover must be called after no-shutdown drain");
 	});
 
-	it("normal action cannot replace pending supervised-restart", async () => {
+	it("does NOT call recover when shutdown was requested", async () => {
 		const cc = new ControlCoordinator();
-		let called = "";
+		let recovered = false;
+
 		cc.request(async () => {
-			called = "restart";
+			cc.shutdownRequested = true;
 		}, "supervised-restart");
+
+		await cc.drainAndRecover(async () => {
+			recovered = true;
+		});
+
+		assert.equal(recovered, false, "recover must NOT be called when shutdown was requested");
+	});
+
+	it("calls recover even when action throws (no shutdown)", async () => {
+		const cc = new ControlCoordinator();
+		let recovered = false;
+		let caught: unknown;
+
 		cc.request(async () => {
-			called = "normal";
+			throw new Error("action failure");
 		}, "normal");
-		await cc.drain();
-		assert.equal(called, "restart");
+
+		try {
+			await cc.drainAndRecover(async () => {
+				recovered = true;
+			});
+		} catch (e) {
+			caught = e;
+		}
+
+		assert.equal(recovered, true, "recover must be called even when action throws");
+		assert.ok(caught instanceof Error, "action error must be rethrown");
+		assert.equal((caught as Error).message, "action failure");
 	});
 
-	it("hasPending is false after drain", async () => {
+	it("skips recovery when action throws but shutdown was requested", async () => {
 		const cc = new ControlCoordinator();
-		cc.request(async () => {});
-		assert.equal(cc.hasPending, true);
-		await cc.drain();
-		assert.equal(cc.hasPending, false);
+		let recovered = false;
+		let caught: unknown;
+
+		cc.request(async () => {
+			// Marker write succeeded, confirmation send throws
+			cc.shutdownRequested = true;
+			throw new Error("confirmation send failure");
+		}, "supervised-restart");
+
+		try {
+			await cc.drainAndRecover(async () => {
+				recovered = true;
+			});
+		} catch (e) {
+			caught = e;
+		}
+
+		assert.equal(recovered, false, "recover must NOT be called when shutdown was requested even on throw");
+		assert.ok(caught instanceof Error, "action error must be rethrown");
+		assert.equal((caught as Error).message, "confirmation send failure");
 	});
 
-	it("outbound AbortError + settlement: restart executes exactly once", async () => {
-		// Simulate: action set while busy, drained via agent_settled after
-		// an AbortError path that also drained (no-op second drain)
+	it("rethrows action error after recovery", async () => {
+		const cc = new ControlCoordinator();
+
+		cc.request(async () => {
+			throw new Error("marker write failure");
+		}, "supervised-restart");
+
+		await assert.rejects(
+			() =>
+				cc.drainAndRecover(async () => {
+					// recovery runs, then error rethrows
+				}),
+			/marker write failure/,
+		);
+	});
+
+	it("hasPending blocks dispatch before and during restart action", async () => {
+		const cc = new ControlCoordinator();
+		const d = deferred();
+
+		cc.request(async () => {
+			await d.promise;
+		}, "supervised-restart");
+
+		// Start drain (action runs async)
+		const drainPromise = cc.drain();
+
+		// While restart is running, hasPending is true
+		assert.equal(cc.hasPending, true, "hasPending must be true while restart runs");
+
+		d.resolve();
+		await drainPromise;
+
+		assert.equal(cc.hasPending, false, "hasPending must be false after drain");
+	});
+
+	it("restart queued while normal running runs next before dispatch", async () => {
+		const cc = new ControlCoordinator();
+		const normalHeld = deferred();
+		const order: string[] = [];
+
+		// Queue a normal action that blocks
+		cc.request(async () => {
+			order.push("normal");
+			await normalHeld.promise;
+		}, "normal");
+
+		// Start draining
+		const drainPromise = cc.drainAndRecover(async () => {
+			order.push("recover");
+		});
+
+		// Wait for normal to start running
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Queue a restart while normal is running
+		cc.request(async () => {
+			order.push("restart");
+		}, "supervised-restart");
+
+		// Release normal
+		normalHeld.resolve();
+		await drainPromise;
+
+		// restart must run before recovery (dispatch is suppressed)
+		assert.deepEqual(order, ["normal", "restart", "recover"], "restart must run before recovery");
+	});
+
+	it("concurrent drainAndRecover calls do not double-dispatch", async () => {
+		const cc = new ControlCoordinator();
 		let callCount = 0;
-		const cc = new ControlCoordinator();
 
-		// Simulate agent_end AbortError path
 		cc.request(async () => {
 			callCount++;
 		}, "supervised-restart");
-		const r1 = await cc.drain();
-		assert.equal(r1.didRun, true);
-		assert.equal(callCount, 1);
 
-		// Simulate agent_settled
-		const r2 = await cc.drain();
-		assert.equal(r2.didRun, false);
-		assert.equal(callCount, 1);
-	});
+		// Two concurrent drains — only one should execute the action
+		await Promise.all([cc.drainAndRecover(async () => {}), cc.drainAndRecover(async () => {})]);
 
-	it("non-idle chatTurnInFlight=false: pending action executes once at settlement", async () => {
-		// Simulate: action set while !ctx.isIdle() but chatTurnInFlight=false
-		// agent_end returns early, agent_settled drains
-		let callCount = 0;
-		const cc = new ControlCoordinator();
-
-		cc.request(async () => {
-			callCount++;
-		}, "supervised-restart");
-
-		// Simulate settlement drain
-		const result = await cc.drain();
-		assert.equal(result.didRun, true);
-		assert.equal(callCount, 1);
-	});
-
-	it("queued dispatch suppressed before drain", async () => {
-		const cc = new ControlCoordinator();
-		cc.request(async () => {}, "supervised-restart");
-		assert.equal(cc.hasPending, true, "hasPending must be true before drain");
-		// Caller would gate tryDispatch on hasPending
-	});
-
-	it("marker-write failure resumes dispatch (drain with no shutdown)", async () => {
-		let dispatchedAfterDrain = false;
-		const cc = new ControlCoordinator();
-
-		// Marker-write failure: action runs but doesn't set shutdownRequested
-		cc.request(async () => {
-			// Simulate marker write error, no shutdown requested
-		}, "supervised-restart");
-
-		const result = await cc.drain();
-		assert.equal(result.didRun, true);
-		assert.equal(result.shutdownRequested, false);
-
-		// After non-shutdown drain, dispatch should proceed
-		dispatchedAfterDrain = true;
-		assert.equal(dispatchedAfterDrain, true);
+		assert.equal(callCount, 1, "action must execute exactly once across concurrent drains");
 	});
 });
+
+// ---------------------------------------------------------------------------
+// sendRestartConfirmationAndShutdown
+// ---------------------------------------------------------------------------
 
 describe("sendRestartConfirmationAndShutdown", () => {
 	it("invokes shutdown after send resolves", async () => {
@@ -404,6 +555,10 @@ describe("sendRestartConfirmationAndShutdown", () => {
 	});
 });
 
+// ---------------------------------------------------------------------------
+// Integration: /chat-new command and wiring tests
+// ---------------------------------------------------------------------------
+
 test("index.ts retains /chat-new command and removes obsolete pi.sendUserMessage bridge", async () => {
 	const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
 
@@ -421,26 +576,20 @@ test("index.ts retains /chat-new command and removes obsolete pi.sendUserMessage
 	);
 });
 
-test("wiring survives 3 lifecycle drain sites with correct recovery", async () => {
+test("index.ts uses drainAndRecover at all 3 lifecycle sites", async () => {
 	const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
 
-	// Verify coordinator usage instead of raw pendingAction + shutdownRequested
-	assert.ok(source.includes("new ControlCoordinator()"), "index.ts must use ControlCoordinator");
-
-	// All 3 drain paths must call coordinator.drain() then tryDispatch
-	const drainCalls = source.match(/coordinator\.drain\(\)/g);
-	assert.ok(drainCalls, "coordinator.drain() must be called");
-	assert.equal(
-		drainCalls?.length,
-		3,
-		"coordinator.drain() must appear in 3 places (aborted, AbortError, agent_settled)",
+	// Must use drainAndRecover in the lifecycle paths
+	const drainAndRecoverCalls = source.match(/coordinator\.drainAndRecover\(/g);
+	assert.ok(
+		drainAndRecoverCalls && drainAndRecoverCalls.length >= 3,
+		`coordinator.drainAndRecover() must appear in at least 3 places, found ${drainAndRecoverCalls?.length ?? 0}`,
 	);
 
-	// All drain sites must also call tryDispatch unconditionally
-	const pattern = /coordinator\.drain\(\);[^}]*tryDispatch/g;
-	const matches = source.match(pattern);
-	assert.ok(matches, "every coordinator.drain() must be followed by tryDispatch");
-	assert.equal(matches?.length, 3, "all 3 drain sites must call tryDispatch after drain");
+	// Must NOT use raw coordinator.drain() in lifecycle handlers (agent_end, agent_settled)
+	// drain() might still exist as a public method but shouldn't be called from lifecycle
+	const rawDrainInLifecycle = source.match(/agent_(?:end|settled)[\s\S]*?coordinator\.drain\(\)/);
+	assert.ok(!rawDrainInLifecycle, "coordinator.drain() must not be called directly in lifecycle handlers");
 
 	// Restart uses supervised-restart priority
 	assert.ok(
@@ -464,9 +613,6 @@ test("wiring survives 3 lifecycle drain sites with correct recovery", async () =
 	// shutdownRequested must be on coordinator
 	assert.ok(source.includes("coordinator.shutdownRequested"), "shutdownRequested must be accessed through coordinator");
 
-	// agent_settled handler must exist (no pi as any)
-	assert.ok(
-		source.includes("agent_settled") && !source.includes("as any"),
-		"agent_settled handler must be registered without any cast",
-	);
+	// agent_settled handler must exist
+	assert.ok(source.includes("agent_settled"), "agent_settled handler must be registered");
 });

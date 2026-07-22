@@ -718,11 +718,18 @@ export default function (pi: ExtensionAPI) {
 						}
 						if (control === "compact") {
 							const runCompact = async () => {
-								ctx.compact({
-									onComplete: () => void liveConnection?.sendImmediate("Compaction completed."),
-									onError: (error) => void liveConnection?.sendImmediate(`Compaction failed: ${error.message}`),
+								await new Promise<void>((resolve, reject) => {
+									ctx.compact({
+										onComplete: () => {
+											liveConnection?.sendImmediate("Compaction completed.").catch(() => {});
+											resolve();
+										},
+										onError: (error) => {
+											liveConnection?.sendImmediate(`Compaction failed: ${error.message}`).catch(() => {});
+											reject(error);
+										},
+									});
 								});
-								await liveConnection?.sendImmediate("Compaction started.");
 							};
 							if (chatTurnInFlight || !ctx.isIdle()) {
 								coordinator.request(runCompact, "normal");
@@ -1428,9 +1435,10 @@ export default function (pi: ExtensionAPI) {
 			stopTypingLoop();
 			chatTurnInFlight = false;
 			await runtime.failActiveJob("aborted");
-			await coordinator.drain();
-			updateStatus(ctx);
-			await tryDispatch(ctx);
+			await coordinator.drainAndRecover(async () => {
+				updateStatus(ctx);
+				await tryDispatch(ctx);
+			});
 			return;
 		}
 		if (summary.stopReason === "error" || summary.stopReason === "length") {
@@ -1467,9 +1475,10 @@ export default function (pi: ExtensionAPI) {
 				chatTurnInFlight = false;
 				if (error instanceof Error && error.name === "AbortError") {
 					await runtime.failActiveJob("aborted");
-					await coordinator.drain();
-					updateStatus(ctx);
-					await tryDispatch(ctx);
+					await coordinator.drainAndRecover(async () => {
+						updateStatus(ctx);
+						await tryDispatch(ctx);
+					});
 					return;
 				}
 				await runtime.failActiveJob(`send failed: ${message}`);
@@ -1491,8 +1500,9 @@ export default function (pi: ExtensionAPI) {
 		handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>,
 	) => void;
 	onAgentSettled("agent_settled", async (_event, ctx) => {
-		await coordinator.drain();
-		updateStatus(ctx);
-		await tryDispatch(ctx);
+		await coordinator.drainAndRecover(async () => {
+			updateStatus(ctx);
+			await tryDispatch(ctx);
+		});
 	});
 }
