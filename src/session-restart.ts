@@ -3,6 +3,28 @@ import { rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 /**
+ * Attempts to send a restart confirmation notification (e.g. via the live
+ * connection), then always invokes the shutdown callback — even when the send
+ * operation rejects. If the send rejects, the error propagates to the caller
+ * after shutdown has been called.
+ *
+ * This guarantees that the supervisor-restart marker write (which must have
+ * completed before this function is called) and the process shutdown always
+ * happen together, even when the confirmation send fails due to a network or
+ * API error.
+ */
+export async function sendRestartConfirmationAndShutdown(
+	send: () => Promise<void>,
+	shutdown: () => void,
+): Promise<void> {
+	try {
+		await send();
+	} finally {
+		shutdown();
+	}
+}
+
+/**
  * Reads the environment variable `PI_CHAT_NEW_SESSION_REQUEST_FILE` and returns
  * the configured path, or `undefined` when the value is blank, missing, or
  * whitespace-only. Defaults to `process.env` when no argument is given.

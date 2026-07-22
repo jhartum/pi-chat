@@ -33,7 +33,11 @@ import { connectLive } from "./src/live/index.js";
 import type { LiveConnection } from "./src/live/types.js";
 import { ConversationRuntime } from "./src/runtime.js";
 import { createSecretRequest, tryDecryptSecret } from "./src/secrets.js";
-import { getSessionRestartRequestFile, writeSessionRestartRequest } from "./src/session-restart.js";
+import {
+	getSessionRestartRequestFile,
+	sendRestartConfirmationAndShutdown,
+	writeSessionRestartRequest,
+} from "./src/session-restart.js";
 import { runChatConfigUI } from "./src/tui/chat-config.js";
 import { runWithLoader, selectItem, showNotice } from "./src/tui/dialogs.js";
 
@@ -748,8 +752,12 @@ export default function (pi: ExtensionAPI) {
 									return;
 								}
 								shutdownRequested = true;
-								await liveConnection?.sendImmediate("Starting a new pi session.");
-								ctx.shutdown();
+								await sendRestartConfirmationAndShutdown(
+									async () => {
+										await liveConnection?.sendImmediate("Starting a new pi session.");
+									},
+									() => ctx.shutdown(),
+								);
 							};
 							if (chatTurnInFlight || !ctx.isIdle()) {
 								pendingControlAction = queueNewSession;

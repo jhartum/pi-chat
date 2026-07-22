@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after, describe, it } from "node:test";
 
-import { getSessionRestartRequestFile, writeSessionRestartRequest } from "../src/session-restart.js";
+import {
+	getSessionRestartRequestFile,
+	sendRestartConfirmationAndShutdown,
+	writeSessionRestartRequest,
+} from "../src/session-restart.js";
 
 describe("getSessionRestartRequestFile", () => {
 	it("returns undefined when PI_CHAT_NEW_SESSION_REQUEST_FILE is not set", () => {
@@ -128,6 +132,54 @@ test("getSessionRestartRequestFile and writeSessionRestartRequest integrate", as
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+describe("sendRestartConfirmationAndShutdown", () => {
+	it("invokes shutdown after send resolves", async () => {
+		let shutdownCalled = false;
+		let sendCalled = false;
+		const send = async () => {
+			sendCalled = true;
+		};
+		const shutdown = () => {
+			shutdownCalled = true;
+		};
+
+		await sendRestartConfirmationAndShutdown(send, shutdown);
+		assert.equal(sendCalled, true);
+		assert.equal(shutdownCalled, true);
+	});
+
+	it("invokes shutdown even when send rejects", async () => {
+		let shutdownCalled = false;
+		const send = async () => {
+			throw new Error("network failure");
+		};
+		const shutdown = () => {
+			shutdownCalled = true;
+		};
+
+		await assert.rejects(() => sendRestartConfirmationAndShutdown(send, shutdown), /network failure/);
+		assert.equal(shutdownCalled, true, "shutdown must be called even when send rejects");
+	});
+
+	it("propagates send rejection after calling shutdown", async () => {
+		let shutdownCalled = false;
+		const send = async () => {
+			throw new Error("api error");
+		};
+		const shutdown = () => {
+			shutdownCalled = true;
+		};
+
+		try {
+			await sendRestartConfirmationAndShutdown(send, shutdown);
+			assert.fail("should have rejected");
+		} catch (err) {
+			assert.equal(shutdownCalled, true);
+			assert.equal(err instanceof Error ? err.message : String(err), "api error");
+		}
+	});
 });
 
 test("index.ts retains /chat-new command and removes obsolete pi.sendUserMessage bridge", async () => {
