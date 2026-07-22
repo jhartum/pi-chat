@@ -1,5 +1,6 @@
 import type { TelegramAccountConfig } from "../core/config-types.js";
 import type { AccountValidationResult, DiscoverySnapshot } from "../core/discovery-types.js";
+import { telegramFetch } from "../telegram-http.js";
 import type { AccountDraft, DiscoveryProvider } from "./types.js";
 
 interface TelegramResponse<T> {
@@ -16,7 +17,7 @@ interface TelegramUser {
 }
 
 async function callTelegram<T>(botToken: string, method: string): Promise<T> {
-	const response = await fetch(`https://api.telegram.org/bot${botToken}/${method}`);
+	const response = await telegramFetch(`https://api.telegram.org/bot${botToken}/${method}`);
 	const data = (await response.json()) as TelegramResponse<T>;
 	if (!response.ok || !data.ok || data.result === undefined) {
 		throw new Error(data.description || `Telegram API ${method} failed`);

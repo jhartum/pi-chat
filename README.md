@@ -60,6 +60,8 @@ pi -e /path/to/pi-chat
 3. Enter your bot token
 4. Add DMs or groups through the guided setup
 
+To proxy only Telegram API and file requests, set `PI_CHAT_TELEGRAM_PROXY_URL`. Other host-side and Gondolin traffic remains direct.
+
 ---
 
 ## Commands

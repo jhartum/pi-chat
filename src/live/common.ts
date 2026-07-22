@@ -69,8 +69,12 @@ export async function readLocalAttachment(
 	return { name: basename(path), data: new Uint8Array(await readFile(path)), mimeType: guessMimeType(path) };
 }
 
-export async function fetchBinary(url: string, headers?: HeadersInit): Promise<Uint8Array> {
-	const response = await fetch(url, { headers });
+export async function fetchBinary(
+	url: string,
+	headers?: HeadersInit,
+	fetcher: typeof fetch = fetch,
+): Promise<Uint8Array> {
+	const response = await fetcher(url, { headers });
 	if (!response.ok) throw new Error(`Download failed ${response.status}: ${url}`);
 	return new Uint8Array(await response.arrayBuffer());
 }

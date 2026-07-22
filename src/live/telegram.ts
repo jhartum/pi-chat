@@ -3,6 +3,7 @@ import type { InboundMessageInput } from "../core/runtime-types.js";
 import { chunkText } from "../render/chunking.js";
 import { formatMarkdownForService, maxMessageLength } from "../render/format.js";
 import { StreamingPreview } from "../render/streaming.js";
+import { telegramFetch } from "../telegram-http.js";
 import {
 	fetchBinary,
 	guessAttachmentKind,
@@ -73,7 +74,7 @@ async function callTelegram<T>(
 	body: Record<string, unknown>,
 	options?: { signal?: AbortSignal },
 ): Promise<T> {
-	const response = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
+	const response = await telegramFetch(`https://api.telegram.org/bot${botToken}/${method}`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(body),
@@ -95,7 +96,11 @@ async function downloadTelegramFile(
 	mimeType?: string,
 ) {
 	const info = await callTelegram<TelegramGetFileResult>(botToken, "getFile", { file_id: fileId });
-	const data = await fetchBinary(`https://api.telegram.org/file/bot${botToken}/${info.file_path}`);
+	const data = await fetchBinary(
+		`https://api.telegram.org/file/bot${botToken}/${info.file_path}`,
+		undefined,
+		telegramFetch,
+	);
 	return [await storeDownloadedAttachment(conversation, messageId, index, fileName, data, mimeType, info.file_path)];
 }
 
@@ -363,7 +368,7 @@ export async function connectTelegramLive(
 			if (text) firstForm.set("caption", text);
 			if (text && firstKind === "image") firstForm.set("parse_mode", "Markdown");
 			firstForm.set(firstField, new Blob([Buffer.from(first.data)], { type: first.mimeType }), first.name);
-			const firstResponse = await fetch(`https://api.telegram.org/bot${account.botToken}/${firstMethod}`, {
+			const firstResponse = await telegramFetch(`https://api.telegram.org/bot${account.botToken}/${firstMethod}`, {
 				method: "POST",
 				body: firstForm,
 				signal,
@@ -379,7 +384,7 @@ export async function connectTelegramLive(
 				const form = new FormData();
 				form.set("chat_id", String(Number(conversation.channel.id)));
 				form.set(field, new Blob([Buffer.from(file.data)], { type: file.mimeType }), file.name);
-				const response = await fetch(`https://api.telegram.org/bot${account.botToken}/${method}`, {
+				const response = await telegramFetch(`https://api.telegram.org/bot${account.botToken}/${method}`, {
 					method: "POST",
 					body: form,
 					signal,

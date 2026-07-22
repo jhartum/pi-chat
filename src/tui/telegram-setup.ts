@@ -5,6 +5,7 @@ import { saveChatConfig } from "../config.js";
 import type { AccessPolicy, ChatConfig, ConfiguredChannel, TelegramAccountConfig } from "../core/config-types.js";
 import { makeAccountKey, makeChannelKey } from "../core/keys.js";
 import { refreshAccountSnapshot, updateAccountIdentityFromSnapshot, validateAccountDraft } from "../services/index.js";
+import { telegramFetch } from "../telegram-http.js";
 import { runWithLoader, showNotice } from "./dialogs.js";
 
 interface TelegramApiResponse<T> {
@@ -69,7 +70,7 @@ function ensureUniqueKey(existing: Record<string, unknown>, base: string): strin
 }
 
 async function callTelegram<T>(botToken: string, method: string, body: Record<string, unknown>): Promise<T> {
-	const response = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
+	const response = await telegramFetch(`https://api.telegram.org/bot${botToken}/${method}`, {
 		method: "POST",
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(body),
