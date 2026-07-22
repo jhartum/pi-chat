@@ -732,17 +732,18 @@ export default function (pi: ExtensionAPI) {
 									});
 								});
 							};
-							if (isControlBusy(chatTurnInFlight, ctx.isIdle(), coordinator.hasPending)) {
-								const accepted = coordinator.request(runCompact, "normal");
-								if (!accepted) {
-									await liveConnection?.sendImmediate("A session restart is already pending. Unable to compact.");
-									return;
-								}
+							const controlBusy = isControlBusy(chatTurnInFlight, ctx.isIdle(), coordinator.hasPending);
+							const accepted = coordinator.request(runCompact, "normal");
+							if (!accepted) {
+								await liveConnection?.sendImmediate("A session restart is already pending. Unable to compact.");
+								return;
+							}
+							if (controlBusy) {
 								ctx.abort();
 								await liveConnection?.sendImmediate("Aborting current turn, then compacting.");
 								return;
 							}
-							await runCompact();
+							await coordinator.drainAndRecover(() => tryDispatch(ctx));
 							return;
 						}
 						if (control === "status") {
@@ -771,17 +772,18 @@ export default function (pi: ExtensionAPI) {
 									() => ctx.shutdown(),
 								);
 							};
-							if (isControlBusy(chatTurnInFlight, ctx.isIdle(), coordinator.hasPending)) {
-								const accepted = coordinator.request(queueNewSession, "supervised-restart");
-								if (!accepted) {
-									await liveConnection?.sendImmediate("A session restart is already pending.");
-									return;
-								}
+							const controlBusy = isControlBusy(chatTurnInFlight, ctx.isIdle(), coordinator.hasPending);
+							const accepted = coordinator.request(queueNewSession, "supervised-restart");
+							if (!accepted) {
+								await liveConnection?.sendImmediate("A session restart is already pending.");
+								return;
+							}
+							if (controlBusy) {
 								ctx.abort();
 								await liveConnection?.sendImmediate("Aborting current turn, then starting a new pi session.");
 								return;
 							}
-							await queueNewSession();
+							await coordinator.drainAndRecover(() => tryDispatch(ctx));
 							return;
 						}
 						await runtime.ingestInbound(input, checkpoint);

@@ -858,6 +858,23 @@ test("index.ts checks accepted before ctx.abort and sends truthful messages", as
 	);
 });
 
+test("idle remote controls enter the coordinator before asynchronous work", async () => {
+	const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
+
+	assert.ok(
+		!/^\s*await runCompact\(\);$/m.test(source),
+		"idle compact must not run outside the coordinator dispatch gate",
+	);
+	assert.ok(
+		!/^\s*await queueNewSession\(\);$/m.test(source),
+		"idle remote new must not write the marker outside the coordinator dispatch gate",
+	);
+	assert.ok(
+		(source.match(/coordinator\.drainAndRecover\(/g)?.length ?? 0) >= 5,
+		"idle compact and new must drain through the same tested coordinator lifecycle",
+	);
+});
+
 test("index.ts uses drainAndRecover at all 3 lifecycle sites", async () => {
 	const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
 
