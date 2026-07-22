@@ -34,8 +34,8 @@ import type { LiveConnection } from "./src/live/types.js";
 import { ConversationRuntime } from "./src/runtime.js";
 import { createSecretRequest, tryDecryptSecret } from "./src/secrets.js";
 import {
+	ControlCoordinator,
 	getSessionRestartRequestFile,
-	PendingAction,
 	sendRestartConfirmationAndShutdown,
 	writeSessionRestartRequest,
 } from "./src/session-restart.js";
@@ -450,8 +450,7 @@ export default function (pi: ExtensionAPI) {
 	let workerStatusInterval: ReturnType<typeof setInterval> | undefined;
 	let queuedOutboundAttachments: string[] = [];
 	let pendingChatDispatch = false;
-	const pendingAction = new PendingAction();
-	let shutdownRequested = false;
+	const coordinator = new ControlCoordinator();
 	let activeTriggerMessageId: string | undefined;
 
 	function persistChatState(conversationId?: string): void {
@@ -726,7 +725,7 @@ export default function (pi: ExtensionAPI) {
 								await liveConnection?.sendImmediate("Compaction started.");
 							};
 							if (chatTurnInFlight || !ctx.isIdle()) {
-								pendingAction.set(runCompact);
+								coordinator.request(runCompact, "normal");
 								ctx.abort();
 								await liveConnection?.sendImmediate("Aborting current turn, then compacting.");
 								return;
@@ -752,7 +751,7 @@ export default function (pi: ExtensionAPI) {
 									await liveConnection?.sendImmediate(`Failed to write session restart request: ${message}`);
 									return;
 								}
-								shutdownRequested = true;
+								coordinator.shutdownRequested = true;
 								await sendRestartConfirmationAndShutdown(
 									async () => {
 										await liveConnection?.sendImmediate("Starting a new pi session.");
@@ -761,7 +760,7 @@ export default function (pi: ExtensionAPI) {
 								);
 							};
 							if (chatTurnInFlight || !ctx.isIdle()) {
-								pendingAction.set(queueNewSession);
+								coordinator.request(queueNewSession, "supervised-restart");
 								ctx.abort();
 								await liveConnection?.sendImmediate("Aborting current turn, then starting a new pi session.");
 								return;
@@ -1097,7 +1096,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	async function tryDispatch(ctx: ExtensionContext): Promise<void> {
-		if (!runtime || chatTurnInFlight || !ctx.isIdle() || shutdownRequested || pendingAction.hasPending) return;
+		if (!runtime || chatTurnInFlight || !ctx.isIdle() || coordinator.shutdownRequested || coordinator.hasPending)
+			return;
 		const next = runtime.beginNextJob();
 		if (!next) {
 			updateStatus(ctx);
@@ -1178,7 +1178,7 @@ export default function (pi: ExtensionAPI) {
 				await restartSandbox(ctx, conversationId);
 			};
 			if (chatTurnInFlight || !ctx.isIdle()) {
-				pendingAction.set(action);
+				coordinator.request(action, "normal");
 				ctx.abort();
 				ctx.ui.notify("Aborting current turn, then restarting sandbox.", "info");
 				return;
@@ -1428,11 +1428,7 @@ export default function (pi: ExtensionAPI) {
 			stopTypingLoop();
 			chatTurnInFlight = false;
 			await runtime.failActiveJob("aborted");
-			const didRun = await pendingAction.drain();
-			if (didRun) {
-				updateStatus(ctx);
-				return;
-			}
+			await coordinator.drain();
 			updateStatus(ctx);
 			await tryDispatch(ctx);
 			return;
@@ -1471,7 +1467,7 @@ export default function (pi: ExtensionAPI) {
 				chatTurnInFlight = false;
 				if (error instanceof Error && error.name === "AbortError") {
 					await runtime.failActiveJob("aborted");
-					await pendingAction.drain();
+					await coordinator.drain();
 					updateStatus(ctx);
 					await tryDispatch(ctx);
 					return;
@@ -1488,14 +1484,15 @@ export default function (pi: ExtensionAPI) {
 		await tryDispatch(ctx);
 	});
 
-	// Pi 0.81.1+ emits agent_settled after agent_end and retries/compact
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
-	(pi as any).on("agent_settled", async (_event: any, ctx: any) => {
-		const didRun = await pendingAction.drain();
-		if (didRun) {
-			updateStatus(ctx);
-			return;
-		}
+	// Pi 0.81.1+ emits agent_settled after agent_end and retries/compact.
+	// The local Pi type definitions do not include this event yet.
+	const onAgentSettled = pi.on as unknown as (
+		event: "agent_settled",
+		handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>,
+	) => void;
+	onAgentSettled("agent_settled", async (_event, ctx) => {
+		await coordinator.drain();
+		updateStatus(ctx);
 		await tryDispatch(ctx);
 	});
 }

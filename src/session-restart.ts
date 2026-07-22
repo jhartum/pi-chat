@@ -2,17 +2,46 @@ import { randomUUID } from "node:crypto";
 import { rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
+/** Priority for a pending control action. */
+export type ActionPriority = "normal" | "supervised-restart";
+
+/** Return value from draining a pending action. */
+export interface DrainResult {
+	/** True when a pending action existed and was executed. */
+	didRun: boolean;
+	/** The shutdownRequested value at the time of drain completion. */
+	shutdownRequested: boolean;
+}
+
 /**
- * Manages a single deferred action that can be set while the agent is busy
- * and drained when the agent settles. Ensures the action executes at most
- * once, even when multiple drain attempts occur.
+ * Manages a single deferred action with priority. A supervised-restart action
+ * can replace any pending action, but a normal action cannot replace a pending
+ * supervised-restart. This prevents race conditions where a later compact or
+ * sandbox-restart could displace an authorized remote restart.
+ *
+ * Ensures the action executes at most once, even when multiple drain attempts
+ * occur.
  */
 export class PendingAction {
 	private action: (() => Promise<void>) | undefined;
+	private priority: ActionPriority = "normal";
 
-	/** Store a pending action. Replaces any previously stored action. */
-	set(fn: () => Promise<void>): void {
+	/**
+	 * Store a pending action. A supervised-restart replaces any existing action.
+	 * A normal action is silently ignored when a supervised-restart is already
+	 * pending.
+	 */
+	set(fn: () => Promise<void>, priority: ActionPriority = "normal"): void {
+		// supervised-restart can replace anything
+		if (priority === "supervised-restart") {
+			this.action = fn;
+			this.priority = priority;
+			return;
+		}
+		// normal action cannot replace a supervised-restart
+		if (this.priority === "supervised-restart") return;
 		this.action = fn;
+		this.priority = priority;
 	}
 
 	/**
@@ -23,6 +52,7 @@ export class PendingAction {
 		const fn = this.action;
 		if (!fn) return false;
 		this.action = undefined;
+		this.priority = "normal";
 		await fn();
 		return true;
 	}
@@ -32,9 +62,58 @@ export class PendingAction {
 		return this.action !== undefined;
 	}
 
+	/** The priority of the currently pending action. */
+	get currentPriority(): ActionPriority {
+		return this.priority;
+	}
+
 	/** Discard the pending action without executing it. */
 	clear(): void {
 		this.action = undefined;
+		this.priority = "normal";
+	}
+}
+
+/**
+ * Production coordinator for deferred control actions. Wraps a PendingAction
+ * with a shutdownRequested flag and provides a drain() method that returns both
+ * whether an action ran and whether shutdown was requested. Used by index.ts
+ * to unify control action lifecycle across agent_end and agent_settled.
+ */
+export class ControlCoordinator {
+	private readonly pending = new PendingAction();
+	private _shutdownRequested = false;
+
+	get shutdownRequested(): boolean {
+		return this._shutdownRequested;
+	}
+
+	set shutdownRequested(value: boolean) {
+		this._shutdownRequested = value;
+	}
+
+	get hasPending(): boolean {
+		return this.pending.hasPending;
+	}
+
+	/** Request a control action with the given priority. */
+	request(fn: () => Promise<void>, priority: ActionPriority = "normal"): void {
+		this.pending.set(fn, priority);
+	}
+
+	/**
+	 * Drain the pending action (if any). Always returns the drain result
+	 * including whether shutdown was requested. After a non-shutdown action
+	 * (e.g. marker-write failure), the caller MUST resume normal dispatch.
+	 */
+	async drain(): Promise<DrainResult> {
+		const didRun = await this.pending.drain();
+		return { didRun, shutdownRequested: this._shutdownRequested };
+	}
+
+	clear(): void {
+		this.pending.clear();
+		this._shutdownRequested = false;
 	}
 }
 
