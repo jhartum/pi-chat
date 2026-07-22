@@ -6,6 +6,7 @@ import path from "node:path";
 import { createHttpHooks, RealFSProvider, type SecretDefinition, VM } from "@earendil-works/gondolin";
 
 import type { ResolvedConversation } from "./core/config-types.js";
+import { buildGondolinNetworkOptions } from "./gondolin-network.js";
 import { ensureConversationDirs } from "./log.js";
 
 export const GONDOLIN_WORKSPACE = "/workspace";
@@ -73,7 +74,9 @@ export class ConversationSandbox {
 		this.starting = (async () => {
 			await ensureConversationDirs(this.conversation);
 			const secretConfig = resolveSecretEnvironment(this.conversation);
+			const networkConfig = buildGondolinNetworkOptions(this.conversation);
 			const vm = await VM.create({
+				...networkConfig,
 				sessionLabel: `pi-chat ${this.conversation.conversationName}`,
 				env: secretConfig.env,
 				httpHooks: secretConfig.httpHooks,

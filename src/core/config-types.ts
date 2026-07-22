@@ -14,8 +14,13 @@ export interface GondolinSecretConfig {
 	hosts: string[];
 }
 
+export interface GondolinTcpConfig {
+	hosts: Record<string, string>;
+}
+
 export interface GondolinConfig {
 	secrets?: Record<string, GondolinSecretConfig>;
+	tcp?: GondolinTcpConfig;
 }
 
 export interface ConfiguredChannel {
@@ -70,6 +75,7 @@ export interface ResolvedConversation {
 	conversationName: string;
 	access: AccessPolicy;
 	gondolinSecrets: Record<string, GondolinSecretConfig>;
+	gondolinTcpHosts: Record<string, string>;
 	accountDir: string;
 	sharedDir: string;
 	conversationDir: string;

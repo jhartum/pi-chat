@@ -50,6 +50,12 @@ function mergeGondolinSecrets(...configs: Array<GondolinConfig | undefined>): Re
 	return merged;
 }
 
+function mergeGondolinTcpHosts(...configs: Array<GondolinConfig | undefined>): Record<string, string> {
+	const merged: Record<string, string> = {};
+	for (const config of configs) Object.assign(merged, config?.tcp?.hosts ?? {});
+	return merged;
+}
+
 function buildResolvedConversation(
 	config: ChatConfig,
 	accountId: string,
@@ -72,6 +78,7 @@ function buildResolvedConversation(
 		conversationName: `${account.name ?? accountId} / ${channel.name ?? channelKey}`,
 		access: mergeAccess(account.access, channel.access),
 		gondolinSecrets: mergeGondolinSecrets(config.gondolin, account.gondolin, channel.gondolin),
+		gondolinTcpHosts: mergeGondolinTcpHosts(config.gondolin, account.gondolin, channel.gondolin),
 		accountDir,
 		sharedDir: join(accountDir, "shared"),
 		conversationDir,

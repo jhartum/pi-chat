@@ -110,7 +110,11 @@ async function configureSecrets(
 	config: GondolinConfig | undefined,
 	onSave: (next: GondolinConfig | undefined) => Promise<void>,
 ): Promise<void> {
-	let current: GondolinConfig = { secrets: { ...(config?.secrets ?? {}) } };
+	let current: GondolinConfig = {
+		...config,
+		secrets: { ...(config?.secrets ?? {}) },
+		tcp: config?.tcp ? { hosts: { ...config.tcp.hosts } } : undefined,
+	};
 	while (true) {
 		const secrets = current.secrets ?? {};
 		const choice = await selectItem(ctx, title, [
@@ -127,8 +131,9 @@ async function configureSecrets(
 		]);
 		if (!choice || choice === "__back__") return;
 		if (choice === "__save__") {
-			const next = Object.keys(current.secrets ?? {}).length > 0 ? current : undefined;
-			await onSave(next);
+			const hasSecrets = Object.keys(current.secrets ?? {}).length > 0;
+			const hasTcpMappings = Object.keys(current.tcp?.hosts ?? {}).length > 0;
+			await onSave(hasSecrets || hasTcpMappings ? current : undefined);
 			return;
 		}
 		if (choice === "__add__") {

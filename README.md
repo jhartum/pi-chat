@@ -183,6 +183,24 @@ Configure secrets at three levels via `/chat-config`:
 
 Each secret has a value and allowed host patterns. Gondolin replaces placeholder env vars with real values only for outbound HTTP requests to allowed hosts. The agent never sees the real secret value.
 
+### Raw TCP mappings
+
+Raw TCP is blocked by default. Configure explicit mappings at the global, account, or channel level when a guest CLI needs a non-HTTP protocol such as PostgreSQL:
+
+```json
+{
+  "gondolin": {
+    "tcp": {
+      "hosts": {
+        "postgres.internal:5432": "pgbouncer:5432"
+      }
+    }
+  }
+}
+```
+
+Mappings are merged from global to account to channel scope, with the more specific scope taking precedence. Configuring at least one mapping enables synthetic per-host DNS. Wildcards are not supported. Keep database credentials outside the VM, for example in a PgBouncer sidecar backed by a Docker Compose secret.
+
 ### Runtime Secrets (encrypted exchange)
 
 For credentials the agent needs at runtime (API keys for skills, OAuth files, etc.):
