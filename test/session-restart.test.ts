@@ -7,6 +7,7 @@ import test, { after, describe, it } from "node:test";
 
 import {
 	getSessionRestartRequestFile,
+	PendingAction,
 	sendRestartConfirmationAndShutdown,
 	writeSessionRestartRequest,
 } from "../src/session-restart.js";
@@ -134,6 +135,54 @@ test("getSessionRestartRequestFile and writeSessionRestartRequest integrate", as
 	}
 });
 
+describe("PendingAction", () => {
+	it("executes the action exactly once on drain", async () => {
+		const pa = new PendingAction();
+		let callCount = 0;
+		pa.set(async () => {
+			callCount++;
+		});
+
+		const r1 = await pa.drain();
+		assert.equal(r1, true);
+		assert.equal(callCount, 1);
+
+		const r2 = await pa.drain();
+		assert.equal(r2, false);
+		assert.equal(callCount, 1);
+	});
+
+	it("returns false when nothing is pending", async () => {
+		const pa = new PendingAction();
+		assert.equal(await pa.drain(), false);
+	});
+
+	it("hasPending reflects stored state", () => {
+		const pa = new PendingAction();
+		assert.equal(pa.hasPending, false);
+
+		pa.set(async () => {});
+		assert.equal(pa.hasPending, true);
+
+		pa.clear();
+		assert.equal(pa.hasPending, false);
+	});
+
+	it("replaces previous action on second set", async () => {
+		const pa = new PendingAction();
+		let called = "";
+		pa.set(async () => {
+			called = "first";
+		});
+		pa.set(async () => {
+			called = "second";
+		});
+
+		await pa.drain();
+		assert.equal(called, "second");
+	});
+});
+
 describe("sendRestartConfirmationAndShutdown", () => {
 	it("invokes shutdown after send resolves", async () => {
 		let shutdownCalled = false;
@@ -196,5 +245,25 @@ test("index.ts retains /chat-new command and removes obsolete pi.sendUserMessage
 	assert.ok(
 		!source.includes(obsoleteBridgePattern),
 		'index.ts must NOT contain the obsolete pi.sendUserMessage("/chat-new") bridge; remote new now writes restart marker directly',
+	);
+});
+
+test("index.ts wires agent_settled to drain pending action", async () => {
+	const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
+
+	// agent_settled handler must call pendingAction.drain()
+	assert.ok(source.includes('.on("agent_settled"'), "index.ts must register an agent_settled event handler");
+	assert.ok(source.includes("pendingAction.drain()"), "agent_settled handler must drain the pending action");
+
+	// agent_end's outbound AbortError catch must also drain
+	assert.ok(
+		source.includes("await pendingAction.drain();") && source.includes('error.name === "AbortError"'),
+		"agent_end AbortError catch must drain pending action with pendingAction.drain()",
+	);
+
+	// tryDispatch must be guarded by pendingAction.hasPending
+	assert.ok(
+		source.includes("pendingAction.hasPending") && source.includes("async function tryDispatch"),
+		"tryDispatch must return when pendingAction.hasPending is true",
 	);
 });

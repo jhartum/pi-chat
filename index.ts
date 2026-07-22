@@ -35,6 +35,7 @@ import { ConversationRuntime } from "./src/runtime.js";
 import { createSecretRequest, tryDecryptSecret } from "./src/secrets.js";
 import {
 	getSessionRestartRequestFile,
+	PendingAction,
 	sendRestartConfirmationAndShutdown,
 	writeSessionRestartRequest,
 } from "./src/session-restart.js";
@@ -449,7 +450,7 @@ export default function (pi: ExtensionAPI) {
 	let workerStatusInterval: ReturnType<typeof setInterval> | undefined;
 	let queuedOutboundAttachments: string[] = [];
 	let pendingChatDispatch = false;
-	let pendingControlAction: (() => Promise<void>) | undefined;
+	const pendingAction = new PendingAction();
 	let shutdownRequested = false;
 	let activeTriggerMessageId: string | undefined;
 
@@ -725,7 +726,7 @@ export default function (pi: ExtensionAPI) {
 								await liveConnection?.sendImmediate("Compaction started.");
 							};
 							if (chatTurnInFlight || !ctx.isIdle()) {
-								pendingControlAction = runCompact;
+								pendingAction.set(runCompact);
 								ctx.abort();
 								await liveConnection?.sendImmediate("Aborting current turn, then compacting.");
 								return;
@@ -760,7 +761,7 @@ export default function (pi: ExtensionAPI) {
 								);
 							};
 							if (chatTurnInFlight || !ctx.isIdle()) {
-								pendingControlAction = queueNewSession;
+								pendingAction.set(queueNewSession);
 								ctx.abort();
 								await liveConnection?.sendImmediate("Aborting current turn, then starting a new pi session.");
 								return;
@@ -1096,7 +1097,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	async function tryDispatch(ctx: ExtensionContext): Promise<void> {
-		if (!runtime || chatTurnInFlight || !ctx.isIdle() || shutdownRequested) return;
+		if (!runtime || chatTurnInFlight || !ctx.isIdle() || shutdownRequested || pendingAction.hasPending) return;
 		const next = runtime.beginNextJob();
 		if (!next) {
 			updateStatus(ctx);
@@ -1177,7 +1178,7 @@ export default function (pi: ExtensionAPI) {
 				await restartSandbox(ctx, conversationId);
 			};
 			if (chatTurnInFlight || !ctx.isIdle()) {
-				pendingControlAction = action;
+				pendingAction.set(action);
 				ctx.abort();
 				ctx.ui.notify("Aborting current turn, then restarting sandbox.", "info");
 				return;
@@ -1427,10 +1428,8 @@ export default function (pi: ExtensionAPI) {
 			stopTypingLoop();
 			chatTurnInFlight = false;
 			await runtime.failActiveJob("aborted");
-			const action = pendingControlAction;
-			pendingControlAction = undefined;
-			if (action) {
-				await action();
+			const didRun = await pendingAction.drain();
+			if (didRun) {
 				updateStatus(ctx);
 				return;
 			}
@@ -1472,6 +1471,7 @@ export default function (pi: ExtensionAPI) {
 				chatTurnInFlight = false;
 				if (error instanceof Error && error.name === "AbortError") {
 					await runtime.failActiveJob("aborted");
+					await pendingAction.drain();
 					updateStatus(ctx);
 					await tryDispatch(ctx);
 					return;
@@ -1485,6 +1485,17 @@ export default function (pi: ExtensionAPI) {
 		chatTurnInFlight = false;
 		await runtime.completeActiveJob(finalText, remoteMessageId, attachmentPaths);
 		updateStatus(ctx);
+		await tryDispatch(ctx);
+	});
+
+	// Pi 0.81.1+ emits agent_settled after agent_end and retries/compact
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	(pi as any).on("agent_settled", async (_event: any, ctx: any) => {
+		const didRun = await pendingAction.drain();
+		if (didRun) {
+			updateStatus(ctx);
+			return;
+		}
 		await tryDispatch(ctx);
 	});
 }

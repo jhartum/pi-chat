@@ -3,6 +3,42 @@ import { rename, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 /**
+ * Manages a single deferred action that can be set while the agent is busy
+ * and drained when the agent settles. Ensures the action executes at most
+ * once, even when multiple drain attempts occur.
+ */
+export class PendingAction {
+	private action: (() => Promise<void>) | undefined;
+
+	/** Store a pending action. Replaces any previously stored action. */
+	set(fn: () => Promise<void>): void {
+		this.action = fn;
+	}
+
+	/**
+	 * Execute the stored action exactly once, then clear it.
+	 * Returns true when an action was executed.
+	 */
+	async drain(): Promise<boolean> {
+		const fn = this.action;
+		if (!fn) return false;
+		this.action = undefined;
+		await fn();
+		return true;
+	}
+
+	/** True when a pending action exists and has not been drained. */
+	get hasPending(): boolean {
+		return this.action !== undefined;
+	}
+
+	/** Discard the pending action without executing it. */
+	clear(): void {
+		this.action = undefined;
+	}
+}
+
+/**
  * Attempts to send a restart confirmation notification (e.g. via the live
  * connection), then always invokes the shutdown callback — even when the send
  * operation rejects. If the send rejects, the error propagates to the caller
