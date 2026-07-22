@@ -11,11 +11,11 @@ function jsonResponse(result: unknown): Response {
 	});
 }
 
-function conversation(): ResolvedConversation {
+function conversation(threadId = "1"): ResolvedConversation {
 	const channel = {
 		id: "-1001669827300",
-		name: "Production / general",
-		telegramThreadId: "1",
+		name: `Production / topic ${threadId}`,
+		telegramThreadId: threadId,
 	};
 	const account: TelegramAccountConfig = {
 		service: "telegram",
@@ -124,4 +124,89 @@ test("Telegram live adapter isolates and targets a configured forum topic", asyn
 		assert.ok(request.method === "sendMessage" || request.method === "sendChatAction");
 		assert.equal(request.body.message_thread_id, 1);
 	}
+});
+
+test("shares one Telegram update cursor across multiple topic workers", async () => {
+	const originalFetch = globalThis.fetch;
+	const inbound = new Map<string, string[]>();
+	let getUpdatesCalls = 0;
+	let resolveLongPoll: ((response: Response) => void) | undefined;
+	globalThis.fetch = (async (input, init) => {
+		const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+		const method = url.split("/").at(-1) ?? "";
+		if (method !== "getUpdates") return jsonResponse({ message_id: 300 });
+		getUpdatesCalls += 1;
+		if (getUpdatesCalls === 1) return jsonResponse([]);
+		if (getUpdatesCalls === 2) {
+			return new Promise<Response>((resolve, reject) => {
+				resolveLongPoll = resolve;
+				init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), {
+					once: true,
+				});
+			});
+		}
+		return new Promise<Response>((_resolve, reject) => {
+			init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), {
+				once: true,
+			});
+		});
+	}) as typeof fetch;
+	const errors: Error[] = [];
+	let first: Awaited<ReturnType<typeof connectTelegramLive>> | undefined;
+	let second: Awaited<ReturnType<typeof connectTelegramLive>> | undefined;
+	try {
+		first = await connectTelegramLive(conversation("1"), {
+			onMessage: async (input) => {
+				inbound.set("1", [...(inbound.get("1") ?? []), input.messageId]);
+			},
+			onCaughtUp: async () => {},
+			onError: async (error) => errors.push(error),
+		});
+		second = await connectTelegramLive(conversation("2"), {
+			onMessage: async (input) => {
+				inbound.set("2", [...(inbound.get("2") ?? []), input.messageId]);
+			},
+			onCaughtUp: async () => {},
+			onError: async (error) => errors.push(error),
+		});
+		resolveLongPoll?.(
+			jsonResponse([
+				{
+					update_id: 11,
+					message: {
+						message_id: 111,
+						message_thread_id: 1,
+						chat: { id: -1001669827300, type: "supergroup" },
+						from: { id: 10 },
+						text: "topic one",
+					},
+				},
+				{
+					update_id: 12,
+					message: {
+						message_id: 112,
+						message_thread_id: 2,
+						chat: { id: -1001669827300, type: "supergroup" },
+						from: { id: 11 },
+						text: "topic two",
+					},
+				},
+			]),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	} finally {
+		await second?.disconnect();
+		await first?.disconnect();
+		globalThis.fetch = originalFetch;
+	}
+
+	assert.deepEqual(
+		inbound,
+		new Map([
+			["1", ["111"]],
+			["2", ["112"]],
+		]),
+	);
+	assert.equal(getUpdatesCalls, 3);
+	assert.deepEqual(errors, []);
 });

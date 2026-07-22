@@ -94,6 +94,153 @@ async function callTelegram<T>(
 	return data.result;
 }
 
+interface TelegramUpdateSubscriber {
+	deliver(update: TelegramUpdate): Promise<void>;
+	onCaughtUp(): Promise<void>;
+	onError(error: Error): Promise<void>;
+}
+
+interface TelegramSubscriberRecord {
+	subscriber: TelegramUpdateSubscriber;
+	active: boolean;
+	queued: TelegramUpdate[];
+}
+
+interface PendingSubscriber {
+	resolve(): void;
+	reject(error: unknown): void;
+}
+
+const telegramPollers = new Map<string, TelegramUpdatePoller>();
+
+class TelegramUpdatePoller {
+	private readonly subscribers = new Set<TelegramSubscriberRecord>();
+	private readonly pending = new Map<TelegramSubscriberRecord, PendingSubscriber>();
+	private readonly controller = new AbortController();
+	private offset = 0;
+	private started = false;
+	private ready = false;
+	private stopped = false;
+	private runPromise?: Promise<void>;
+
+	constructor(private readonly botToken: string) {}
+
+	async subscribe(subscriber: TelegramUpdateSubscriber): Promise<() => Promise<void>> {
+		if (this.stopped) throw new Error("Telegram update poller is stopped");
+		const record: TelegramSubscriberRecord = { subscriber, active: false, queued: [] };
+		this.subscribers.add(record);
+		const ready = new Promise<void>((resolve, reject) => this.pending.set(record, { resolve, reject }));
+		if (!this.started) {
+			this.started = true;
+			this.runPromise = this.run();
+			void this.runPromise;
+		} else if (this.ready) {
+			void this.activate(record);
+		}
+		await ready;
+		return async () => this.unsubscribe(record);
+	}
+
+	private async activate(record: TelegramSubscriberRecord): Promise<void> {
+		const pending = this.pending.get(record);
+		if (!pending || !this.subscribers.has(record)) return;
+		try {
+			await record.subscriber.onCaughtUp();
+			while (record.queued.length > 0) {
+				const update = record.queued.shift();
+				if (update) await this.deliver(record, update);
+			}
+			record.active = true;
+			this.pending.delete(record);
+			pending.resolve();
+		} catch (error) {
+			this.pending.delete(record);
+			this.subscribers.delete(record);
+			pending.reject(error);
+		}
+	}
+
+	private async deliver(record: TelegramSubscriberRecord, update: TelegramUpdate): Promise<void> {
+		try {
+			await record.subscriber.deliver(update);
+		} catch (error) {
+			await record.subscriber.onError(error instanceof Error ? error : new Error(String(error))).catch(() => undefined);
+		}
+	}
+
+	private async dispatch(update: TelegramUpdate): Promise<void> {
+		await Promise.all(
+			[...this.subscribers].map(async (record) => {
+				if (!record.active) {
+					record.queued.push(update);
+					return;
+				}
+				await this.deliver(record, update);
+			}),
+		);
+	}
+
+	private async run(): Promise<void> {
+		try {
+			const initialUpdates = await callTelegram<TelegramUpdate[]>(this.botToken, "getUpdates", {
+				offset: undefined,
+				timeout: 0,
+				allowed_updates: ["message", "edited_message"],
+			});
+			for (const update of initialUpdates) {
+				this.offset = update.update_id + 1;
+				await this.dispatch(update);
+			}
+			this.ready = true;
+			await Promise.all([...this.subscribers].map((record) => this.activate(record)));
+			while (!this.stopped) {
+				const updates = await callTelegram<TelegramUpdate[]>(
+					this.botToken,
+					"getUpdates",
+					{
+						offset: this.offset > 0 ? this.offset : undefined,
+						timeout: 30,
+						allowed_updates: ["message", "edited_message"],
+					},
+					{ signal: this.controller.signal },
+				);
+				for (const update of updates) {
+					this.offset = update.update_id + 1;
+					await this.dispatch(update);
+				}
+			}
+		} catch (error) {
+			if (this.stopped || (error instanceof DOMException && error.name === "AbortError")) return;
+			const normalized = error instanceof Error ? error : new Error(String(error));
+			for (const pending of this.pending.values()) pending.reject(normalized);
+			await Promise.all(
+				[...this.subscribers].map((record) => record.subscriber.onError(normalized).catch(() => undefined)),
+			);
+		} finally {
+			if (telegramPollers.get(this.botToken) === this) telegramPollers.delete(this.botToken);
+		}
+	}
+
+	private async unsubscribe(record: TelegramSubscriberRecord): Promise<void> {
+		this.subscribers.delete(record);
+		this.pending.delete(record);
+		record.queued = [];
+		if (this.subscribers.size !== 0) return;
+		this.stopped = true;
+		if (telegramPollers.get(this.botToken) === this) telegramPollers.delete(this.botToken);
+		this.controller.abort();
+		await this.runPromise?.catch(() => undefined);
+	}
+}
+
+function getTelegramPoller(botToken: string): TelegramUpdatePoller {
+	const existing = telegramPollers.get(botToken);
+	if (existing) return existing;
+	const poller = new TelegramUpdatePoller(botToken);
+	telegramPollers.set(botToken, poller);
+	return poller;
+}
+
 async function downloadTelegramFile(
 	conversation: ResolvedConversation,
 	botToken: string,
@@ -188,14 +335,11 @@ async function messageToInput(
 export async function connectTelegramLive(
 	conversation: ResolvedConversation,
 	handlers: LiveConnectionHandlers,
-	resumeState?: ResumeState,
+	_resumeState?: ResumeState,
 ): Promise<LiveConnection> {
 	const account = conversation.account as TelegramAccountConfig;
 	const target = resolveTelegramTarget(conversation.channel);
 	const threadBody = <T extends Record<string, unknown>>(body: T) => withTelegramThread(target, body);
-	let abort = false;
-	let offset = resumeState?.cursor ? Number(resumeState.cursor) + 1 : 0;
-	const pollController = new AbortController();
 	const preview = new StreamingPreview(conversation.service, {
 		create: async (text, parseMode, replyToMessageId) =>
 			String(
@@ -263,78 +407,35 @@ export async function connectTelegramLive(
 			messageId: input.messageId,
 		});
 	};
-	const processInitialUpdates = async (updates: TelegramUpdate[]): Promise<void> => {
-		const grouped = new Map<string, TelegramUpdate[]>();
-		for (const update of updates) {
-			offset = update.update_id + 1;
-			const message = update.message || update.edited_message;
-			if (!message) continue;
-			if (!message.media_group_id) {
-				const input = await messageToInput(conversation, account, target, message);
-				if (input) await handlers.onMessage(input, { cursor: String(update.update_id), messageId: input.messageId });
-				continue;
-			}
+	const deliverUpdate = async (update: TelegramUpdate): Promise<void> => {
+		const message = update.message || update.edited_message;
+		if (!message) return;
+		if (message.media_group_id) {
 			const key = `${message.chat.id}:${message.message_thread_id ?? ""}:${message.media_group_id}`;
-			grouped.set(key, [...(grouped.get(key) ?? []), update]);
-		}
-		for (const updates of grouped.values()) {
-			const merged = mergeMediaGroup(updates);
-			if (!merged) continue;
-			const input = await messageToInput(conversation, account, target, merged);
-			if (!input) continue;
-			await handlers.onMessage(input, {
-				cursor: String(updates.at(-1)?.update_id ?? 0),
-				messageId: input.messageId,
-			});
-		}
-	};
-	const initialUpdates = await callTelegram<TelegramUpdate[]>(account.botToken, "getUpdates", {
-		offset: offset > 0 ? offset : undefined,
-		timeout: 0,
-		allowed_updates: ["message", "edited_message"],
-	});
-	await processInitialUpdates(initialUpdates);
-	await handlers.onCaughtUp();
-	const loop = (async () => {
-		while (!abort) {
-			try {
-				const updates = await callTelegram<TelegramUpdate[]>(
-					account.botToken,
-					"getUpdates",
-					{ offset: offset > 0 ? offset : undefined, timeout: 30, allowed_updates: ["message", "edited_message"] },
-					{ signal: pollController.signal },
+			const existing = mediaGroups.get(key) ?? { updates: [] };
+			existing.updates.push(update);
+			if (existing.timer) clearTimeout(existing.timer);
+			existing.timer = setTimeout(() => {
+				void flushMediaGroup(key).catch(
+					(error) => void handlers.onError(error instanceof Error ? error : new Error(String(error))),
 				);
-				for (const update of updates) {
-					offset = update.update_id + 1;
-					const message = update.message || update.edited_message;
-					if (!message) continue;
-					if (message.media_group_id) {
-						const key = `${message.chat.id}:${message.message_thread_id ?? ""}:${message.media_group_id}`;
-						const existing = mediaGroups.get(key) ?? { updates: [] };
-						existing.updates.push(update);
-						if (existing.timer) clearTimeout(existing.timer);
-						existing.timer = setTimeout(() => void flushMediaGroup(key), 1200);
-						mediaGroups.set(key, existing);
-						continue;
-					}
-					const input = await messageToInput(conversation, account, target, message);
-					if (input) await handlers.onMessage(input, { cursor: String(update.update_id), messageId: input.messageId });
-				}
-			} catch (error) {
-				if (abort) break;
-				if (error instanceof DOMException && error.name === "AbortError") break;
-				await handlers.onError(error instanceof Error ? error : new Error(String(error)));
-				await new Promise((resolve) => setTimeout(resolve, 3000));
-			}
+			}, 1200);
+			mediaGroups.set(key, existing);
+			return;
 		}
-	})();
+		const input = await messageToInput(conversation, account, target, message);
+		if (input) await handlers.onMessage(input, { cursor: String(update.update_id), messageId: input.messageId });
+	};
+	const unsubscribe = await getTelegramPoller(account.botToken).subscribe({
+		deliver: deliverUpdate,
+		onCaughtUp: handlers.onCaughtUp,
+		onError: handlers.onError,
+	});
 	return {
 		conversation,
 		disconnect: async () => {
-			abort = true;
-			pollController.abort();
 			for (const state of mediaGroups.values()) if (state.timer) clearTimeout(state.timer);
-			await loop.catch(() => undefined);
+			await unsubscribe();
 		},
 		sendImmediate: async (text, replyToMessageId) =>
 			String(
