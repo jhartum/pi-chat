@@ -20,7 +20,7 @@ test("matches only the configured Telegram topic", () => {
 	const target = resolveTelegramTarget({ id: "-1001669827300", telegramThreadId: "1" });
 
 	assert.equal(matchesTelegramTarget(target, { chat: { id: -1001669827300 }, message_thread_id: 1 }), true);
-	assert.equal(matchesTelegramTarget(target, { chat: { id: -1001669827300 } }), false);
+	assert.equal(matchesTelegramTarget(target, { chat: { id: -1001669827300 } }), true);
 	assert.equal(matchesTelegramTarget(target, { chat: { id: -1001669827300 }, message_thread_id: 2 }), false);
 });
 

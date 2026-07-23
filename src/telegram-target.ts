@@ -21,7 +21,9 @@ export function resolveTelegramTarget(channel: Pick<ConfiguredChannel, "id" | "t
 
 export function matchesTelegramTarget(target: TelegramTarget, message: TelegramTargetMessage): boolean {
 	if (String(message.chat.id) !== target.chatId) return false;
-	return target.threadId === undefined || message.message_thread_id === target.threadId;
+	if (target.threadId === undefined) return true;
+	if (message.message_thread_id === undefined) return target.threadId === 1;
+	return message.message_thread_id === target.threadId;
 }
 
 export function withTelegramThread<T extends Record<string, unknown>>(
