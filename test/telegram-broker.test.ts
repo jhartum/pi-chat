@@ -119,3 +119,59 @@ test("Telegram broker routes one bot poller to a group and isolated DM workers",
 		await rm(root, { recursive: true, force: true });
 	}
 });
+
+test("Telegram broker times out and retries a stalled proxy request", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-chat-broker-retry-"));
+	const socketPath = join(root, "telegram.sock");
+	const config: ChatConfig = {
+		accounts: { telegram: account({ general: { id: "-1001669827300", telegramThreadId: "1" } }) },
+	};
+	let calls = 0;
+	let resolveRetry: ((value: Response) => void) | undefined;
+	const fakeFetch = (async (_input, init) => {
+		calls += 1;
+		if (calls === 1) return response([]);
+		return new Promise<Response>((resolve, reject) => {
+			if (calls === 3) resolveRetry = resolve;
+			init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+		});
+	}) as typeof fetch;
+	const broker = await startTelegramBroker({
+		config,
+		socketPath,
+		stateDir: join(root, "state"),
+		fetch: fakeFetch,
+		requestTimeoutMs: 10,
+		retryDelayMs: 0,
+	});
+	const received: number[] = [];
+	const disconnect = await subscribeTelegramBroker(socketPath, "telegram/general", undefined, {
+		deliver: async (update) => {
+			received.push(update.update_id);
+		},
+		onCaughtUp: async () => {},
+		onError: async (error) => {
+			throw error;
+		},
+	});
+
+	try {
+		await until(() => resolveRetry !== undefined);
+		resolveRetry?.(
+			response([
+				{
+					update_id: 21,
+					message: { message_id: 201, chat: { id: -1001669827300, type: "supergroup" }, text: "retry" },
+				},
+			]),
+		);
+		await until(() => received.length === 1);
+		assert.deepEqual(received, [21]);
+		await until(() => calls >= 4);
+		assert.equal(JSON.parse(await readFile(join(root, "state/8512736788.json"), "utf8")).nextOffset, 22);
+	} finally {
+		await disconnect();
+		await broker.close();
+		await rm(root, { recursive: true, force: true });
+	}
+});

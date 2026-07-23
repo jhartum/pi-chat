@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import { dirname, join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 
 import type { ChatConfig, TelegramAccountConfig } from "./core/config-types.js";
@@ -49,7 +50,11 @@ interface BrokerOptions {
 	socketPath: string;
 	stateDir: string;
 	fetch?: typeof fetch;
+	requestTimeoutMs?: number;
+	retryDelayMs?: number;
 }
+
+class TelegramBrokerRequestError extends Error {}
 
 export interface RunningTelegramBroker {
 	done: Promise<void>;
@@ -143,6 +148,7 @@ async function callGetUpdates(
 	timeout: number,
 	fetchFn: typeof fetch,
 	signal: AbortSignal,
+	requestTimeoutMs?: number,
 ): Promise<TelegramUpdate[]> {
 	let response: Response;
 	try {
@@ -154,11 +160,14 @@ async function callGetUpdates(
 				timeout,
 				allowed_updates: ["message", "edited_message"],
 			}),
-			signal,
+			signal: AbortSignal.any([
+				signal,
+				AbortSignal.timeout(requestTimeoutMs ?? Math.max(15_000, (timeout + 15) * 1000)),
+			]),
 		});
-	} catch (error) {
-		if (error instanceof DOMException && error.name === "AbortError") throw error;
-		throw new Error("Telegram broker request failed");
+	} catch {
+		if (signal.aborted) throw signal.reason;
+		throw new TelegramBrokerRequestError("Telegram broker request failed");
 	}
 	const data = (await response.json()) as TelegramResponse<TelegramUpdate[]>;
 	if (!response.ok || !data.ok || !Array.isArray(data.result)) {
@@ -337,6 +346,20 @@ export async function startTelegramBroker(options: BrokerOptions): Promise<Runni
 	await chmod(options.socketPath, 0o600);
 
 	const fetchFn = options.fetch ?? telegramFetch;
+	const poll = async (group: BotGroup, offset: number, timeout: number): Promise<TelegramUpdate[]> => {
+		let retryDelayMs = options.retryDelayMs ?? 1000;
+		while (!closing) {
+			try {
+				return await callGetUpdates(group, offset, timeout, fetchFn, controller.signal, options.requestTimeoutMs);
+			} catch (error) {
+				if (!(error instanceof TelegramBrokerRequestError)) throw error;
+				console.error("Telegram broker request failed; retrying");
+				await delay(retryDelayMs, undefined, { signal: controller.signal });
+				retryDelayMs = Math.min(retryDelayMs * 2, 30_000);
+			}
+		}
+		throw new DOMException("Telegram broker is closing", "AbortError");
+	};
 	const runGroup = async (group: BotGroup) => {
 		await Promise.all(group.routes.map((route) => waitForSubscriber(route.conversationId)));
 		const state = await readState(group.statePath);
@@ -345,7 +368,7 @@ export async function startTelegramBroker(options: BrokerOptions): Promise<Runni
 			await Promise.all(group.routes.map((route) => ensureCaughtUp(route.conversationId)));
 		} else {
 			while (!closing) {
-				const updates = await callGetUpdates(group, state.nextOffset, 0, fetchFn, controller.signal);
+				const updates = await poll(group, state.nextOffset, 0);
 				if (updates.length === 0) break;
 				for (const update of updates) {
 					await routeUpdate(group, update);
@@ -359,7 +382,7 @@ export async function startTelegramBroker(options: BrokerOptions): Promise<Runni
 			await Promise.all(group.routes.map((route) => ensureCaughtUp(route.conversationId)));
 		}
 		while (!closing) {
-			const updates = await callGetUpdates(group, state.nextOffset, 30, fetchFn, controller.signal);
+			const updates = await poll(group, state.nextOffset, 30);
 			for (const update of updates) {
 				await routeUpdate(group, update);
 				state.nextOffset = update.update_id + 1;
@@ -381,7 +404,7 @@ export async function startTelegramBroker(options: BrokerOptions): Promise<Runni
 			for (const socket of sockets) socket.destroy();
 			await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
 			await done.catch((error) => {
-				if (!(error instanceof DOMException && error.name === "AbortError")) throw error;
+				if (!(error instanceof Error && error.name === "AbortError")) throw error;
 			});
 			await unlink(options.socketPath).catch(() => undefined);
 		},
