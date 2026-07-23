@@ -122,7 +122,7 @@ test("Telegram live adapter isolates and targets a configured forum topic", asyn
 	assert.ok(requests.length >= 4);
 	for (const request of requests) {
 		assert.ok(request.method === "sendMessage" || request.method === "sendChatAction");
-		assert.equal(request.body.message_thread_id, 1);
+		assert.equal("message_thread_id" in request.body, false);
 	}
 });
 

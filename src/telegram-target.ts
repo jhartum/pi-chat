@@ -30,10 +30,10 @@ export function withTelegramThread<T extends Record<string, unknown>>(
 	target: TelegramTarget,
 	body: T,
 ): T & { message_thread_id?: number } {
-	if (target.threadId === undefined) return body;
+	if (target.threadId === undefined || target.threadId === 1) return body;
 	return { ...body, message_thread_id: target.threadId };
 }
 
 export function setTelegramThreadFormField(target: TelegramTarget, form: FormData): void {
-	if (target.threadId !== undefined) form.set("message_thread_id", String(target.threadId));
+	if (target.threadId !== undefined && target.threadId !== 1) form.set("message_thread_id", String(target.threadId));
 }

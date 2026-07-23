@@ -24,17 +24,29 @@ test("matches only the configured Telegram topic", () => {
 	assert.equal(matchesTelegramTarget(target, { chat: { id: -1001669827300 }, message_thread_id: 2 }), false);
 });
 
-test("adds the configured topic to JSON and multipart Telegram requests", () => {
+test("adds a configured non-General topic to JSON and multipart Telegram requests", () => {
+	const target = resolveTelegramTarget({ id: "-1001669827300", telegramThreadId: "2" });
+
+	assert.deepEqual(withTelegramThread(target, { chat_id: -1001669827300, text: "hello" }), {
+		chat_id: -1001669827300,
+		text: "hello",
+		message_thread_id: 2,
+	});
+	const form = new FormData();
+	setTelegramThreadFormField(target, form);
+	assert.equal(form.get("message_thread_id"), "2");
+});
+
+test("omits the General topic ID from Telegram requests", () => {
 	const target = resolveTelegramTarget({ id: "-1001669827300", telegramThreadId: "1" });
 
 	assert.deepEqual(withTelegramThread(target, { chat_id: -1001669827300, text: "hello" }), {
 		chat_id: -1001669827300,
 		text: "hello",
-		message_thread_id: 1,
 	});
 	const form = new FormData();
 	setTelegramThreadFormField(target, form);
-	assert.equal(form.get("message_thread_id"), "1");
+	assert.equal(form.has("message_thread_id"), false);
 });
 
 test("rejects invalid Telegram topic IDs", () => {
