@@ -29,6 +29,7 @@
 	"scripts": {
 		"check": "biome check . && tsc --noEmit",
 		"format": "biome check --write .",
+		"telegram-broker": "tsx src/telegram-broker.ts",
 		"test": "tsx --test test/*.test.ts"
 	},
 	"peerDependencies": {

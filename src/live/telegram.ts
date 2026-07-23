@@ -3,6 +3,7 @@ import type { InboundMessageInput } from "../core/runtime-types.js";
 import { chunkText } from "../render/chunking.js";
 import { formatMarkdownForService, maxMessageLength } from "../render/format.js";
 import { StreamingPreview } from "../render/streaming.js";
+import { subscribeTelegramBroker } from "../telegram-broker-client.js";
 import { telegramFetch } from "../telegram-http.js";
 import type { TelegramTarget } from "../telegram-target.js";
 import {
@@ -11,6 +12,7 @@ import {
 	setTelegramThreadFormField,
 	withTelegramThread,
 } from "../telegram-target.js";
+import type { TelegramMessage, TelegramUpdate } from "../telegram-updates.js";
 import {
 	fetchBinary,
 	guessAttachmentKind,
@@ -24,53 +26,6 @@ interface TelegramResponse<T> {
 	ok: boolean;
 	result?: T;
 	description?: string;
-}
-interface TelegramUser {
-	id: number;
-	username?: string;
-	is_bot?: boolean;
-	first_name?: string;
-}
-interface TelegramChat {
-	id: number;
-	type: string;
-}
-interface TelegramPhotoSize {
-	file_id: string;
-	file_size?: number;
-}
-interface TelegramDocument {
-	file_id: string;
-	file_name?: string;
-	mime_type?: string;
-}
-interface TelegramVideo {
-	file_id: string;
-	file_name?: string;
-	mime_type?: string;
-}
-interface TelegramAudio {
-	file_id: string;
-	file_name?: string;
-	mime_type?: string;
-}
-interface TelegramMessage {
-	message_id: number;
-	message_thread_id?: number;
-	media_group_id?: string;
-	chat: TelegramChat;
-	from?: TelegramUser;
-	text?: string;
-	caption?: string;
-	photo?: TelegramPhotoSize[];
-	document?: TelegramDocument;
-	video?: TelegramVideo;
-	audio?: TelegramAudio;
-}
-interface TelegramUpdate {
-	update_id: number;
-	message?: TelegramMessage;
-	edited_message?: TelegramMessage;
 }
 interface TelegramGetFileResult {
 	file_path: string;
@@ -335,7 +290,7 @@ async function messageToInput(
 export async function connectTelegramLive(
 	conversation: ResolvedConversation,
 	handlers: LiveConnectionHandlers,
-	_resumeState?: ResumeState,
+	resumeState?: ResumeState,
 ): Promise<LiveConnection> {
 	const account = conversation.account as TelegramAccountConfig;
 	const target = resolveTelegramTarget(conversation.channel);
@@ -426,11 +381,16 @@ export async function connectTelegramLive(
 		const input = await messageToInput(conversation, account, target, message);
 		if (input) await handlers.onMessage(input, { cursor: String(update.update_id), messageId: input.messageId });
 	};
-	const unsubscribe = await getTelegramPoller(account.botToken).subscribe({
+	const subscriber = {
 		deliver: deliverUpdate,
 		onCaughtUp: handlers.onCaughtUp,
 		onError: handlers.onError,
-	});
+		onDisconnect: handlers.onDisconnect,
+	};
+	const brokerSocket = process.env.PI_CHAT_TELEGRAM_BROKER_SOCKET?.trim();
+	const unsubscribe = brokerSocket
+		? await subscribeTelegramBroker(brokerSocket, conversation.conversationId, resumeState?.cursor, subscriber)
+		: await getTelegramPoller(account.botToken).subscribe(subscriber);
 	return {
 		conversation,
 		disconnect: async () => {

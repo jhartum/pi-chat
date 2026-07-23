@@ -91,6 +91,15 @@ For a Telegram forum topic, add its Bot API thread ID to the configured channel.
 
 Workers also write status snapshots every 15 seconds under `~/.pi/agent/chat/worker-status/`. The `chat_workers` tool exposes the same status to an orchestrating pi agent.
 
+Telegram permits only one `getUpdates` cursor per bot. When multiple Telegram tmux workers share a bot token, start the broker once and export its socket for the workers:
+
+```bash
+export PI_CHAT_TELEGRAM_BROKER_SOCKET=/tmp/pi-chat-telegram.sock
+npm run telegram-broker
+```
+
+The broker reads the normal pi-chat config, routes updates over a private Unix socket, and advances the bot-global offset only after the matched worker acknowledges ingestion. A deployment supervisor may run the same broker from compiled JavaScript.
+
 ---
 
 ## Remote Control

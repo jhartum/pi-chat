@@ -708,6 +708,7 @@ export default function (pi: ExtensionAPI) {
 							return;
 						}
 						const control = runtime.isArmed() ? runtime.parseControlCommand(input) : undefined;
+						if (control && checkpoint) await runtime.noteCheckpoint(checkpoint);
 						if (control === "stop") {
 							if (chatTurnInFlight || !ctx.isIdle()) {
 								ctx.abort();
