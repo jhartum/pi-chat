@@ -11,6 +11,13 @@ function jsonResponse(result: unknown): Response {
 	});
 }
 
+function errorResponse(description: string): Response {
+	return new Response(JSON.stringify({ ok: false, description }), {
+		status: 400,
+		headers: { "content-type": "application/json" },
+	});
+}
+
 function conversation(threadId = "1"): ResolvedConversation {
 	const channel = {
 		id: "-1001669827300",
@@ -124,6 +131,49 @@ test("Telegram live adapter isolates and targets a configured forum topic", asyn
 		assert.ok(request.method === "sendMessage" || request.method === "sendChatAction");
 		assert.equal("message_thread_id" in request.body, false);
 	}
+});
+
+test("retries a Markdown parse failure as plain text", async () => {
+	const originalFetch = globalThis.fetch;
+	const sent: Array<Record<string, unknown>> = [];
+	let getUpdatesCalls = 0;
+	globalThis.fetch = (async (input, init) => {
+		const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+		const method = url.split("/").at(-1) ?? "";
+		if (method === "getUpdates") {
+			getUpdatesCalls += 1;
+			if (getUpdatesCalls === 1) return jsonResponse([]);
+			return await new Promise<Response>((_resolve, reject) => {
+				init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), {
+					once: true,
+				});
+			});
+		}
+		assert.equal(method, "sendMessage");
+		assert.equal(typeof init?.body, "string");
+		const body = JSON.parse(init.body) as Record<string, unknown>;
+		sent.push(body);
+		if (body.parse_mode === "Markdown") return errorResponse("Bad Request: can't parse entities");
+		return jsonResponse({ message_id: 500 });
+	}) as typeof fetch;
+
+	let connection: Awaited<ReturnType<typeof connectTelegramLive>> | undefined;
+	try {
+		connection = await connectTelegramLive(conversation(), {
+			onMessage: async () => {},
+			onCaughtUp: async () => {},
+			onError: async () => {},
+		});
+		await connection.send("Unclosed *Markdown");
+	} finally {
+		await connection?.disconnect();
+		globalThis.fetch = originalFetch;
+	}
+
+	assert.equal(sent.length, 2);
+	assert.equal(sent[0]?.parse_mode, "Markdown");
+	assert.equal(sent[1]?.parse_mode, undefined);
+	assert.equal(sent[1]?.text, "Unclosed *Markdown");
 });
 
 test("shares one Telegram update cursor across multiple topic workers", async () => {

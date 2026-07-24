@@ -49,6 +49,23 @@ async function callTelegram<T>(
 	return data.result;
 }
 
+async function callTelegramWithMarkdownFallback<T>(
+	botToken: string,
+	method: string,
+	body: Record<string, unknown>,
+	options?: { signal?: AbortSignal },
+): Promise<T> {
+	try {
+		return await callTelegram<T>(botToken, method, body, options);
+	} catch (error) {
+		if (body.parse_mode !== "Markdown" || !(error instanceof Error) || !/can't parse entities/i.test(error.message)) {
+			throw error;
+		}
+		const { parse_mode: _parseMode, ...plainTextBody } = body;
+		return callTelegram<T>(botToken, method, plainTextBody, options);
+	}
+}
+
 interface TelegramUpdateSubscriber {
 	deliver(update: TelegramUpdate): Promise<void>;
 	onCaughtUp(): Promise<void>;
@@ -299,7 +316,7 @@ export async function connectTelegramLive(
 		create: async (text, parseMode, replyToMessageId) =>
 			String(
 				(
-					await callTelegram<{ message_id: number }>(
+					await callTelegramWithMarkdownFallback<{ message_id: number }>(
 						account.botToken,
 						"sendMessage",
 						threadBody({
@@ -313,7 +330,7 @@ export async function connectTelegramLive(
 			),
 		edit: async (id, text, parseMode) => {
 			try {
-				await callTelegram(account.botToken, "editMessageText", {
+				await callTelegramWithMarkdownFallback(account.botToken, "editMessageText", {
 					chat_id: Number(conversation.channel.id),
 					message_id: Number(id),
 					text,
@@ -420,7 +437,7 @@ export async function connectTelegramLive(
 				for (let i = 0; i < chunks.length; i++) {
 					const id = String(
 						(
-							await callTelegram<{ message_id: number }>(
+							await callTelegramWithMarkdownFallback<{ message_id: number }>(
 								account.botToken,
 								"sendMessage",
 								threadBody({
