@@ -153,6 +153,7 @@ Each connection starts a Gondolin micro-VM with:
 - **Alpine Linux** with bash pre-installed
 - `/workspace` → channel workspace directory
 - `/shared` → account shared directory
+- `/repos` → optional operator-provided repositories directory when `PI_CHAT_REPOSITORIES_DIR` is set
 - Tools: `read`, `write`, `edit`, `bash`
 - All outbound HTTP/TLS open by default
 
