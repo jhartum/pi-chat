@@ -451,6 +451,7 @@ export default function (pi: ExtensionAPI) {
 	let workerStatusInterval: ReturnType<typeof setInterval> | undefined;
 	let queuedOutboundAttachments: string[] = [];
 	let pendingChatDispatch = false;
+	let pendingAgentFailure: string | undefined;
 	const coordinator = new ControlCoordinator();
 	let activeTriggerMessageId: string | undefined;
 
@@ -1158,6 +1159,7 @@ export default function (pi: ExtensionAPI) {
 		const current = runtime;
 		runtime = undefined;
 		chatTurnInFlight = false;
+		pendingAgentFailure = undefined;
 		await current.disconnect();
 		if (clearPersistedState) persistChatState(undefined);
 		updateStatus(ctx);
@@ -1450,6 +1452,7 @@ export default function (pi: ExtensionAPI) {
 		if (summary.stopReason === "aborted") {
 			stopTypingLoop();
 			chatTurnInFlight = false;
+			pendingAgentFailure = undefined;
 			await runtime.failActiveJob("aborted");
 			await coordinator.drainAndRecover(async () => {
 				updateStatus(ctx);
@@ -1458,22 +1461,11 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 		if (summary.stopReason === "error" || summary.stopReason === "length") {
-			stopTypingLoop();
-			chatTurnInFlight = false;
-			const errorMessage = summary.errorMessage || `agent ${summary.stopReason}`;
-			await runtime.failActiveJob(errorMessage);
-			if (liveConnection) {
-				try {
-					await liveConnection.sendImmediate(`pi-chat error: ${errorMessage}`);
-				} catch {
-					// ignore secondary send failure
-				}
-			}
-			ctx.ui.notify(errorMessage, "error");
-			updateStatus(ctx, errorMessage);
-			await tryDispatch(ctx);
+			pendingAgentFailure = summary.errorMessage || `agent ${summary.stopReason}`;
+			updateStatus(ctx, pendingAgentFailure);
 			return;
 		}
+		pendingAgentFailure = undefined;
 		stopTypingLoop();
 		let remoteMessageId: string | undefined;
 		const attachmentPaths = [...queuedOutboundAttachments];
@@ -1516,9 +1508,26 @@ export default function (pi: ExtensionAPI) {
 		handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>,
 	) => void;
 	onAgentSettled("agent_settled", async (_event, ctx) => {
+		if (runtime && chatTurnInFlight && pendingAgentFailure) {
+			const errorMessage = pendingAgentFailure;
+			pendingAgentFailure = undefined;
+			stopTypingLoop();
+			chatTurnInFlight = false;
+			await runtime.failActiveJob(errorMessage);
+			if (liveConnection) {
+				try {
+					await liveConnection.sendImmediate(`pi-chat error: ${errorMessage}`);
+				} catch {
+					// ignore secondary send failure
+				}
+			}
+			ctx.ui.notify(errorMessage, "error");
+			updateStatus(ctx, errorMessage);
+		}
 		await coordinator.drainAndRecover(async () => {
 			updateStatus(ctx);
 			await tryDispatch(ctx);
 		});
+		await tryDispatch(ctx);
 	});
 }

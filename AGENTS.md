@@ -99,6 +99,7 @@ Discord/Telegram ←→ Live Adapter ←→ Runtime (log, jobs, slices) ←→ p
 - `job_queued` records a trigger. `sliceStartRecordId` is derived at dispatch time from the last `job_completed.triggerRecordId`.
 - Failed jobs do not advance the consumption boundary.
 - The prompt slice includes all inbound records between the last completed boundary and the trigger.
+- On reconnect, queued jobs without a terminal record are skipped by appending `job_completed` without an outbound record. This advances the consumption boundary and prevents stale work from replaying.
 - On reconnect, catch-up messages are logged but do not trigger until a new trigger arrives after arming.
 
 ## Remote control commands

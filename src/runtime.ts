@@ -89,6 +89,26 @@ export class ConversationRuntime {
 		await acquireConversationLock(this.conversation, this.ownerId);
 		this.records = await readConversationLog(this.conversation);
 		this.nextRecordId = this.records.reduce((max, record) => Math.max(max, record.recordId), 0) + 1;
+		await this.skipInterruptedJobs();
+	}
+
+	private async skipInterruptedJobs(): Promise<void> {
+		const settledJobIds = new Set(
+			this.records
+				.filter((record) => record.type === "job_completed" || record.type === "job_failed")
+				.map((record) => record.jobId),
+		);
+		const interrupted = this.records.filter(
+			(record): record is JobQueuedRecord => record.type === "job_queued" && !settledJobIds.has(record.jobId),
+		);
+		for (const job of interrupted) {
+			await this.appendRecord({
+				type: "job_completed",
+				...buildBaseRecordFields(this.conversation, this.nextRecordId),
+				jobId: job.jobId,
+				triggerRecordId: job.triggerRecordId,
+			});
+		}
 	}
 
 	armAfterCurrentTail(): void {

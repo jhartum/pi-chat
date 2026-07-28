@@ -906,3 +906,26 @@ test("index.ts uses drainAndRecover at all 3 lifecycle sites", async () => {
 	assert.ok(source.includes("coordinator.shutdownRequested"), "shutdownRequested must be accessed through coordinator");
 	assert.ok(source.includes("agent_settled"), "agent_settled handler must be registered");
 });
+
+test("agent_settled dispatches even when no control action was pending", async () => {
+	const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
+	const settledHandler = source.match(/onAgentSettled\("agent_settled",[\s\S]*?\n\t\}\);/u)?.[0] ?? "";
+
+	assert.match(settledHandler, /coordinator\.drainAndRecover/u);
+	assert.match(
+		settledHandler,
+		/\}\);\n\t\tawait tryDispatch\(ctx\);/u,
+		"agent_settled must dispatch after an empty coordinator drain",
+	);
+});
+
+test("retryable agent errors remain active until agent_settled", async () => {
+	const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
+	const errorBranch = source.match(/if \(summary\.stopReason === "error"[\s\S]*?\n\t\t\}/u)?.[0] ?? "";
+	const settledHandler = source.match(/onAgentSettled\("agent_settled",[\s\S]*?\n\t\}\);/u)?.[0] ?? "";
+
+	assert.match(errorBranch, /pendingAgentFailure =/u);
+	assert.doesNotMatch(errorBranch, /failActiveJob/u);
+	assert.match(settledHandler, /pendingAgentFailure/u);
+	assert.match(settledHandler, /failActiveJob\(errorMessage\)/u);
+});
