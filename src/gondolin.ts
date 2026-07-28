@@ -27,7 +27,7 @@ function guestMountRoot(guestPath: string): typeof GONDOLIN_WORKSPACE | typeof G
 	return undefined;
 }
 
-function resolveSecretEnvironment(conversation: ResolvedConversation): {
+export function resolveSecretEnvironment(conversation: ResolvedConversation): {
 	env?: Record<string, string>;
 	httpHooks?: ReturnType<typeof createHttpHooks>["httpHooks"];
 	configuredSecretNames: string[];
@@ -40,7 +40,8 @@ function resolveSecretEnvironment(conversation: ResolvedConversation): {
 		if (secret.hosts.length === 0) throw new Error(`Gondolin secret ${name} must declare at least one host`);
 		secrets[name] = { hosts: [...secret.hosts], value: secret.value };
 	}
-	const { env, httpHooks } = createHttpHooks({ allowedHosts: ["*"], secrets });
+	const allowedInternalHosts = Object.values(secrets).flatMap((secret) => secret.hosts);
+	const { env, httpHooks } = createHttpHooks({ allowedHosts: ["*"], allowedInternalHosts, secrets });
 	return { env, httpHooks, configuredSecretNames };
 }
 
