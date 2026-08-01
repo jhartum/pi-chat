@@ -150,6 +150,7 @@ Everything lives under `~/.pi/agent/chat/`:
 
 Each connection starts a Gondolin micro-VM with:
 
+- VM memory configurable through `PI_CHAT_GONDOLIN_MEMORY` (for example, `512M`); when unset, Gondolin uses its default
 - **Alpine Linux** with bash pre-installed
 - `/workspace` → channel workspace directory
 - `/shared` → account shared directory
