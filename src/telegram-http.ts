@@ -13,9 +13,18 @@ function getProxyAgent(): ProxyAgent | undefined {
 	return proxyAgent;
 }
 
-export function telegramFetch(...args: Parameters<typeof fetch>): ReturnType<typeof fetch> {
+export async function telegramFetch(...args: Parameters<typeof fetch>): ReturnType<typeof fetch> {
 	const agent = getProxyAgent();
 	if (!agent) return fetch(...args);
 	const [input, init] = args;
-	return fetch(input, { ...init, dispatcher: agent } as RequestInit);
+	try {
+		return await fetch(input, { ...init, dispatcher: agent } as RequestInit);
+	} catch (error) {
+		if (proxyAgent === agent) {
+			proxyAgent = undefined;
+			proxyUrl = undefined;
+			void agent.close().catch(() => undefined);
+		}
+		throw error;
+	}
 }
