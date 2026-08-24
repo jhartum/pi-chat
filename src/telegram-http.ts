@@ -8,7 +8,7 @@ function getProxyAgent(): ProxyAgent | undefined {
 	if (!configuredUrl) return undefined;
 	if (proxyAgent && proxyUrl === configuredUrl) return proxyAgent;
 	if (proxyAgent) void proxyAgent.close();
-	proxyAgent = new ProxyAgent(configuredUrl);
+	proxyAgent = new ProxyAgent({ uri: configuredUrl, pipelining: 0 });
 	proxyUrl = configuredUrl;
 	return proxyAgent;
 }

@@ -21,13 +21,13 @@ async function close(server: ReturnType<typeof createServer>): Promise<void> {
 	});
 }
 
-test("routes Telegram requests through PI_CHAT_TELEGRAM_PROXY_URL", async () => {
-	let proxyUsed = false;
+test("routes Telegram requests through fresh proxy tunnels", async () => {
+	let proxyConnections = 0;
 	const target = createServer((_request, response) => response.end("ok"));
 	const targetPort = await listen(target);
 	const proxy = createServer();
 	proxy.on("connect", (request, clientSocket, head) => {
-		proxyUsed = true;
+		proxyConnections += 1;
 		const [host, port] = (request.url ?? "").split(":");
 		const upstream = connect(Number(port), host, () => {
 			clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
@@ -40,9 +40,11 @@ test("routes Telegram requests through PI_CHAT_TELEGRAM_PROXY_URL", async () => 
 	const previous = process.env.PI_CHAT_TELEGRAM_PROXY_URL;
 	process.env.PI_CHAT_TELEGRAM_PROXY_URL = `http://127.0.0.1:${proxyPort}`;
 	try {
-		const response = await telegramFetch(`http://127.0.0.1:${targetPort}/getMe`);
-		assert.equal(await response.text(), "ok");
-		assert.equal(proxyUsed, true);
+		for (let attempt = 0; attempt < 2; attempt += 1) {
+			const response = await telegramFetch(`http://127.0.0.1:${targetPort}/getMe`);
+			assert.equal(await response.text(), "ok");
+		}
+		assert.equal(proxyConnections, 2);
 	} finally {
 		if (previous === undefined) delete process.env.PI_CHAT_TELEGRAM_PROXY_URL;
 		else process.env.PI_CHAT_TELEGRAM_PROXY_URL = previous;
