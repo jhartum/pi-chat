@@ -3,7 +3,8 @@ import { constants as fsConstants, realpathSync } from "node:fs";
 import { access, mkdir, open, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { createHttpHooks, RealFSProvider, type SecretDefinition, VM } from "@earendil-works/gondolin";
+import { createHttpHooks, type HttpFetch, RealFSProvider, type SecretDefinition, VM } from "@earendil-works/gondolin";
+import { ProxyAgent, fetch as undiciFetch } from "undici";
 
 import type { ResolvedConversation } from "./core/config-types.js";
 import { buildGondolinNetworkOptions } from "./gondolin-network.js";
@@ -38,6 +39,17 @@ function isInside(root: string, value: string): boolean {
 
 function isInsideGuestRoot(guestRoot: string, guestPath: string): boolean {
 	return guestPath === guestRoot || guestPath.startsWith(`${guestRoot}/`);
+}
+
+/**
+ * Upstream fetch for guest HTTP interception. The pi-chat container often has no
+ * route to internal-only hosts (e.g. netbird mesh), so route intercepted guest
+ * requests through the configured forward proxy when one is declared.
+ */
+function createProxiedFetch(proxyUrl: string | undefined): HttpFetch | undefined {
+	if (!proxyUrl?.trim()) return undefined;
+	const dispatcher = new ProxyAgent(proxyUrl.trim());
+	return (input, init) => undiciFetch(input, { ...init, dispatcher });
 }
 
 export function resolveSecretEnvironment(conversation: ResolvedConversation): {
@@ -106,6 +118,7 @@ export class ConversationSandbox {
 				sessionLabel: `pi-chat ${this.conversation.conversationName}`,
 				env: secretConfig.env,
 				httpHooks: secretConfig.httpHooks,
+				fetch: createProxiedFetch(this.conversation.gondolinSecrets.NESOFT_PROXY_URL?.value),
 				vfs: {
 					mounts: Object.fromEntries(this.mounts.map((mount) => [mount.guestRoot, new RealFSProvider(mount.hostRoot)])),
 				},
