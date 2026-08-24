@@ -38,7 +38,9 @@ test("routes Telegram requests through fresh proxy tunnels", async () => {
 	});
 	const proxyPort = await listen(proxy);
 	const previous = process.env.PI_CHAT_TELEGRAM_PROXY_URL;
+	const originalFetch = globalThis.fetch;
 	process.env.PI_CHAT_TELEGRAM_PROXY_URL = `http://127.0.0.1:${proxyPort}`;
+	globalThis.fetch = () => Promise.reject(new Error("global fetch must not handle proxied Telegram requests"));
 	try {
 		for (let attempt = 0; attempt < 2; attempt += 1) {
 			const response = await telegramFetch(`http://127.0.0.1:${targetPort}/getMe`);
@@ -46,6 +48,7 @@ test("routes Telegram requests through fresh proxy tunnels", async () => {
 		}
 		assert.equal(proxyConnections, 2);
 	} finally {
+		globalThis.fetch = originalFetch;
 		if (previous === undefined) delete process.env.PI_CHAT_TELEGRAM_PROXY_URL;
 		else process.env.PI_CHAT_TELEGRAM_PROXY_URL = previous;
 		await close(proxy);

@@ -1,4 +1,4 @@
-import { ProxyAgent } from "undici";
+import { ProxyAgent, fetch as undiciFetch } from "undici";
 
 let proxyAgent: ProxyAgent | undefined;
 let proxyUrl: string | undefined;
@@ -18,7 +18,13 @@ export async function telegramFetch(...args: Parameters<typeof fetch>): ReturnTy
 	if (!agent) return fetch(...args);
 	const [input, init] = args;
 	try {
-		return await fetch(input, { ...init, dispatcher: agent } as RequestInit);
+		return (await undiciFetch(
+			input as Parameters<typeof undiciFetch>[0],
+			{
+				...init,
+				dispatcher: agent,
+			} as Parameters<typeof undiciFetch>[1],
+		)) as unknown as Response;
 	} catch (error) {
 		if (proxyAgent === agent) {
 			proxyAgent = undefined;
