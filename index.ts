@@ -820,9 +820,9 @@ export default function (pi: ExtensionAPI) {
 
 	function startTypingLoop(): void {
 		if (!liveConnection || typingInterval) return;
-		void liveConnection.startTyping();
+		void liveConnection.startTyping().catch(() => undefined);
 		typingInterval = setInterval(() => {
-			void liveConnection?.startTyping();
+			void liveConnection?.startTyping().catch(() => undefined);
 		}, 4000);
 	}
 
@@ -831,7 +831,7 @@ export default function (pi: ExtensionAPI) {
 			clearInterval(typingInterval);
 			typingInterval = undefined;
 		}
-		void liveConnection?.stopTyping();
+		void liveConnection?.stopTyping().catch(() => undefined);
 	}
 
 	pi.registerTool({
