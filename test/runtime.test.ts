@@ -102,3 +102,35 @@ test("skipped jobs advance the prompt boundary", async () => {
 		await rm(root, { recursive: true, force: true });
 	}
 });
+
+test("clearPendingJobs drops the queue and advances the prompt boundary", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-chat-runtime-"));
+	const target = conversation(root);
+	try {
+		const runtime = await ConversationRuntime.connect(target, "owner-1");
+		runtime.armAfterCurrentTail();
+		await queueMention(runtime, "1", "old-first");
+		await queueMention(runtime, "2", "old-second");
+		assert.equal(runtime.getStatus().queueLength, 2);
+
+		const cleared = await runtime.clearPendingJobs();
+		assert.equal(cleared, 2);
+		assert.equal(runtime.getStatus().queueLength, 0);
+		assert.equal(runtime.beginNextJob(), undefined);
+
+		runtime.armAfterCurrentTail();
+		await queueMention(runtime, "3", "new-message");
+		const prompt = runtime.beginNextJob()?.prompt ?? "";
+		assert.doesNotMatch(prompt, /old-first/);
+		assert.doesNotMatch(prompt, /old-second/);
+		assert.match(prompt, /new-message/);
+		await runtime.disconnect();
+
+		const restored = await ConversationRuntime.connect(target, "owner-2");
+		assert.equal(restored.getStatus().queueLength, 0);
+		assert.equal(restored.beginNextJob(), undefined);
+		await restored.disconnect();
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});

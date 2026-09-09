@@ -32,13 +32,7 @@ import { connectLive } from "./src/live/index.js";
 import type { LiveConnection } from "./src/live/types.js";
 import { ConversationRuntime } from "./src/runtime.js";
 import { createSecretRequest, tryDecryptSecret } from "./src/secrets.js";
-import {
-	ControlCoordinator,
-	getSessionRestartRequestFile,
-	isControlBusy,
-	sendRestartConfirmationAndShutdown,
-	writeSessionRestartRequest,
-} from "./src/session-restart.js";
+import { ControlCoordinator, isControlBusy } from "./src/session-restart.js";
 import {
 	type ChatPromptSkill,
 	formatChatSkillsForPrompt,
@@ -646,26 +640,26 @@ export default function (pi: ExtensionAPI) {
 							return;
 						}
 						if (control === "new") {
-							const requestFile = getSessionRestartRequestFile();
-							if (!requestFile) {
-								await liveConnection?.sendImmediate("Remote new requires a supervised deployment.");
-								return;
-							}
 							const queueNewSession = async () => {
+								const cleared = runtime ? await runtime.clearPendingJobs() : 0;
+								await liveConnection?.sendImmediate(
+									cleared > 0
+										? `Starting a new pi session. Cleared ${cleared} queued message(s).`
+										: "Starting a new pi session.",
+								);
 								try {
-									await writeSessionRestartRequest(requestFile);
+									// Requires pi-coding-agent >= 0.84.2: expandPromptTemplates
+									// dispatches /chat-new as a command instead of literal model
+									// text (earendil-works/pi-chat#2). Dev-time 0.73.1 types
+									// predate the flag, hence the widening cast.
+									await pi.sendUserMessage("/chat-new", {
+										deliverAs: "followUp",
+										expandPromptTemplates: true,
+									} as { deliverAs: "followUp" });
 								} catch (error) {
 									const message = error instanceof Error ? error.message : String(error);
-									await liveConnection?.sendImmediate(`Failed to write session restart request: ${message}`);
-									return;
+									await liveConnection?.sendImmediate(`Failed to start a new pi session: ${message}`);
 								}
-								coordinator.shutdownRequested = true;
-								await sendRestartConfirmationAndShutdown(
-									async () => {
-										await liveConnection?.sendImmediate("Starting a new pi session.");
-									},
-									() => ctx.shutdown(),
-								);
 							};
 							const controlBusy = isControlBusy(chatTurnInFlight, ctx.isIdle(), coordinator.hasPending);
 							const accepted = coordinator.request(queueNewSession, "supervised-restart");
@@ -1009,8 +1003,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	async function tryDispatch(ctx: ExtensionContext): Promise<void> {
-		if (!runtime || chatTurnInFlight || !ctx.isIdle() || coordinator.shutdownRequested || coordinator.hasPending)
-			return;
+		if (!runtime || chatTurnInFlight || !ctx.isIdle() || coordinator.hasPending) return;
 		const next = runtime.beginNextJob();
 		if (!next) {
 			updateStatus(ctx);

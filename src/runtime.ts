@@ -111,6 +111,24 @@ export class ConversationRuntime {
 		}
 	}
 
+	/**
+	 * Drops queued (not yet started) jobs, advancing the consumption boundary
+	 * with terminal `job_completed` records so the backlog does not replay
+	 * in a fresh session (e.g. remote `new`). Returns the dropped count.
+	 */
+	async clearPendingJobs(): Promise<number> {
+		const dropped = this.pendingJobs.splice(0, this.pendingJobs.length);
+		for (const job of dropped) {
+			await this.appendRecord({
+				type: "job_completed",
+				...buildBaseRecordFields(this.conversation, this.nextRecordId),
+				jobId: job.jobId,
+				triggerRecordId: job.triggerRecordId,
+			});
+		}
+		return dropped.length;
+	}
+
 	armAfterCurrentTail(): void {
 		this.armedAfterRecordId = this.records.at(-1)?.recordId ?? 0;
 	}

@@ -113,9 +113,7 @@ Users in the connected chat can send these commands (with or without mentioning 
 | `compact` | Trigger context compaction |
 | `new` | Start a new pi session |
 
-When the environment variable `PI_CHAT_NEW_SESSION_REQUEST_FILE` is set to a writable file path, the remote `new` command writes a restart marker to that path, signals the running pi-chat extension to stop dispatching new turns, and then shuts down the current pi session. This allows a supervisor process to detect the marker and launch a fresh pi session without `--continue`. The variable is supervisor-owned and not intended to be set inside pi-chat configuration.
-
-When `PI_CHAT_NEW_SESSION_REQUEST_FILE` is unset or empty, remote `new` reports `Remote new requires a supervised deployment.` and the current session continues running unchanged.
+The remote `new` command starts a new pi session via the local `/chat-new` command (dispatched with `expandPromptTemplates`, requires pi-coding-agent >= 0.84.2). The chat connection is kept. Queued messages that arrived before `new` are dropped and reported, so the fresh session starts clean.
 
 ---
 
