@@ -621,10 +621,7 @@ test("index.ts uses drainAndRecover at all 3 lifecycle sites", async () => {
 		"remote new must use supervised-restart priority",
 	);
 
-	assert.ok(
-		/requestControl\([\s\S]*?runCompact,[\s\S]*?"normal"/u.test(source),
-		"compact must use normal priority",
-	);
+	assert.ok(/requestControl\([\s\S]*?runCompact,[\s\S]*?"normal"/u.test(source), "compact must use normal priority");
 	assert.ok(
 		source.includes('coordinator.request(action, "normal"'),
 		"chat-config sandbox restart must use normal priority",
