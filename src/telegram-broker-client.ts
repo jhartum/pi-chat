@@ -2,13 +2,12 @@ import { createConnection } from "node:net";
 
 import type { TelegramUpdate } from "./telegram-updates.js";
 
-interface BrokerSubscriber {
+export interface BrokerSubscriber {
 	deliver(update: TelegramUpdate): Promise<void>;
 	onCaughtUp(): Promise<void>;
 	onError(error: Error): Promise<void>;
 	onDisconnect?(): Promise<void>;
 }
-
 interface BrokerMessage {
 	type?: string;
 	update?: TelegramUpdate;

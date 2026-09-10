@@ -24,11 +24,13 @@ description: >-
 
 test("parseSkillFrontmatter handles plain and quoted single-line descriptions", () => {
 	assert.equal(
-		parseSkillFrontmatter("---\nname: psql\ndescription: Use for PostgreSQL work through the psql CLI.\n---").description,
+		parseSkillFrontmatter("---\nname: psql\ndescription: Use for PostgreSQL work through the psql CLI.\n---")
+			.description,
 		"Use for PostgreSQL work through the psql CLI.",
 	);
 	assert.equal(
-		parseSkillFrontmatter("---\nname: psql\ndescription: \"Use for PostgreSQL work through the psql CLI.\"\n---").description,
+		parseSkillFrontmatter('---\nname: psql\ndescription: "Use for PostgreSQL work through the psql CLI."\n---')
+			.description,
 		"Use for PostgreSQL work through the psql CLI.",
 	);
 });
@@ -83,12 +85,11 @@ disable-model-invocation: true
 		);
 
 		const skills = await loadSafeChatSkills(root);
-		assert.deepEqual(
-			skills.map((skill) => skill.name).sort(),
-			["plain", "s3"],
-			"disabled skills must be excluded",
+		assert.deepEqual(skills.map((skill) => skill.name).sort(), ["plain", "s3"], "disabled skills must be excluded");
+		assert.equal(
+			skills.find((skill) => skill.name === "s3")?.description,
+			"Use for daily standup artifacts in S3 storage.",
 		);
-		assert.equal(skills.find((skill) => skill.name === "s3")?.description, "Use for daily standup artifacts in S3 storage.");
 		assert.equal(skills.find((skill) => skill.name === "plain")?.filePath, join(root, "skills", "plain.md"));
 	} finally {
 		await rm(root, { recursive: true, force: true });

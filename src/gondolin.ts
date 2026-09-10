@@ -14,11 +14,6 @@ export const GONDOLIN_WORKSPACE = "/workspace";
 export const GONDOLIN_SHARED = "/shared";
 export const GONDOLIN_REPOSITORIES = "/repos";
 
-export function resolveGondolinMemory(environment: NodeJS.ProcessEnv = process.env): string | undefined {
-	const configured = environment.PI_CHAT_GONDOLIN_MEMORY?.trim();
-	return configured || undefined;
-}
-
 interface ConversationSandboxOptions {
 	repositoriesDir?: string;
 }
@@ -114,7 +109,7 @@ export class ConversationSandbox {
 			const networkConfig = buildGondolinNetworkOptions(this.conversation);
 			const vm = await VM.create({
 				...networkConfig,
-				memory: resolveGondolinMemory(),
+				memory: process.env.PI_CHAT_GONDOLIN_MEMORY?.trim() || undefined,
 				sessionLabel: `pi-chat ${this.conversation.conversationName}`,
 				env: secretConfig.env,
 				httpHooks: secretConfig.httpHooks,

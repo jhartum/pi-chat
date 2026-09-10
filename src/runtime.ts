@@ -92,16 +92,8 @@ export class ConversationRuntime {
 		await this.skipInterruptedJobs();
 	}
 
-	private async skipInterruptedJobs(): Promise<void> {
-		const settledJobIds = new Set(
-			this.records
-				.filter((record) => record.type === "job_completed" || record.type === "job_failed")
-				.map((record) => record.jobId),
-		);
-		const interrupted = this.records.filter(
-			(record): record is JobQueuedRecord => record.type === "job_queued" && !settledJobIds.has(record.jobId),
-		);
-		for (const job of interrupted) {
+	private async settleJobs(jobs: Array<Pick<PendingJob, "jobId" | "triggerRecordId">>): Promise<void> {
+		for (const job of jobs) {
 			await this.appendRecord({
 				type: "job_completed",
 				...buildBaseRecordFields(this.conversation, this.nextRecordId),
@@ -111,6 +103,18 @@ export class ConversationRuntime {
 		}
 	}
 
+	private async skipInterruptedJobs(): Promise<void> {
+		const settledJobIds = new Set(
+			this.records
+				.filter((record) => record.type === "job_completed" || record.type === "job_failed")
+				.map((record) => record.jobId),
+		);
+		const interrupted = this.records.filter(
+			(record): record is JobQueuedRecord => record.type === "job_queued" && !settledJobIds.has(record.jobId),
+		);
+		await this.settleJobs(interrupted);
+	}
+
 	/**
 	 * Drops queued (not yet started) jobs, advancing the consumption boundary
 	 * with terminal `job_completed` records so the backlog does not replay
@@ -118,14 +122,7 @@ export class ConversationRuntime {
 	 */
 	async clearPendingJobs(): Promise<number> {
 		const dropped = this.pendingJobs.splice(0, this.pendingJobs.length);
-		for (const job of dropped) {
-			await this.appendRecord({
-				type: "job_completed",
-				...buildBaseRecordFields(this.conversation, this.nextRecordId),
-				jobId: job.jobId,
-				triggerRecordId: job.triggerRecordId,
-			});
-		}
+		await this.settleJobs(dropped);
 		return dropped.length;
 	}
 

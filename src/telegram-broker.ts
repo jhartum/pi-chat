@@ -61,10 +61,6 @@ export interface RunningTelegramBroker {
 	close(): Promise<void>;
 }
 
-function updateMessage(update: TelegramUpdate) {
-	return update.message || update.edited_message;
-}
-
 function parseCursor(value: unknown): number {
 	if (value === undefined || value === null || value === "") return 0;
 	if (typeof value !== "string" || !/^[0-9]+$/.test(value) || !Number.isSafeInteger(Number(value))) {
@@ -244,7 +240,7 @@ export async function startTelegramBroker(options: BrokerOptions): Promise<Runni
 		throw new Error("Telegram broker is closing");
 	};
 	const routeUpdate = async (group: BotGroup, update: TelegramUpdate): Promise<void> => {
-		const message = updateMessage(update);
+		const message = update.message || update.edited_message;
 		if (!message) return;
 		const matched = group.routes.filter((route) => matchesTelegramTarget(route.target, message));
 		await Promise.all(matched.map((route) => deliver(route, update)));

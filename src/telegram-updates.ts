@@ -15,19 +15,7 @@ export interface TelegramPhotoSize {
 	file_size?: number;
 }
 
-export interface TelegramDocument {
-	file_id: string;
-	file_name?: string;
-	mime_type?: string;
-}
-
-export interface TelegramVideo {
-	file_id: string;
-	file_name?: string;
-	mime_type?: string;
-}
-
-export interface TelegramAudio {
+export interface TelegramFileAttachment {
 	file_id: string;
 	file_name?: string;
 	mime_type?: string;
@@ -42,9 +30,9 @@ export interface TelegramMessage {
 	text?: string;
 	caption?: string;
 	photo?: TelegramPhotoSize[];
-	document?: TelegramDocument;
-	video?: TelegramVideo;
-	audio?: TelegramAudio;
+	document?: TelegramFileAttachment;
+	video?: TelegramFileAttachment;
+	audio?: TelegramFileAttachment;
 }
 
 export interface TelegramUpdate {

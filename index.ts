@@ -32,6 +32,7 @@ import { connectLive } from "./src/live/index.js";
 import type { LiveConnection } from "./src/live/types.js";
 import { ConversationRuntime } from "./src/runtime.js";
 import { createSecretRequest, tryDecryptSecret } from "./src/secrets.js";
+import type { ActionPriority } from "./src/session-restart.js";
 import { ControlCoordinator, isControlBusy } from "./src/session-restart.js";
 import {
 	type ChatPromptSkill,
@@ -621,18 +622,13 @@ export default function (pi: ExtensionAPI) {
 									});
 								});
 							};
-							const controlBusy = isControlBusy(chatTurnInFlight, ctx.isIdle(), coordinator.hasPending);
-							const accepted = coordinator.request(runCompact, "normal");
-							if (!accepted) {
-								await liveConnection?.sendImmediate("A session restart is already pending. Unable to compact.");
-								return;
-							}
-							if (controlBusy) {
-								ctx.abort();
-								await liveConnection?.sendImmediate("Aborting current turn, then compacting.");
-								return;
-							}
-							await coordinator.drainAndRecover(() => tryDispatch(ctx));
+							await requestControl(
+								ctx,
+								runCompact,
+								"normal",
+								"A session restart is already pending. Unable to compact.",
+								"Aborting current turn, then compacting.",
+							);
 							return;
 						}
 						if (control === "status") {
@@ -661,18 +657,13 @@ export default function (pi: ExtensionAPI) {
 									await liveConnection?.sendImmediate(`Failed to start a new pi session: ${message}`);
 								}
 							};
-							const controlBusy = isControlBusy(chatTurnInFlight, ctx.isIdle(), coordinator.hasPending);
-							const accepted = coordinator.request(queueNewSession, "supervised-restart");
-							if (!accepted) {
-								await liveConnection?.sendImmediate("A session restart is already pending.");
-								return;
-							}
-							if (controlBusy) {
-								ctx.abort();
-								await liveConnection?.sendImmediate("Aborting current turn, then starting a new pi session.");
-								return;
-							}
-							await coordinator.drainAndRecover(() => tryDispatch(ctx));
+							await requestControl(
+								ctx,
+								queueNewSession,
+								"supervised-restart",
+								"A session restart is already pending.",
+								"Aborting current turn, then starting a new pi session.",
+							);
 							return;
 						}
 						await runtime.ingestInbound(input, checkpoint);
@@ -1001,6 +992,27 @@ export default function (pi: ExtensionAPI) {
 			};
 		},
 	});
+
+	async function requestControl(
+		ctx: ExtensionContext,
+		action: () => Promise<void>,
+		priority: ActionPriority,
+		rejectedMessage: string,
+		busyMessage: string,
+	): Promise<void> {
+		const controlBusy = isControlBusy(chatTurnInFlight, ctx.isIdle(), coordinator.hasPending);
+		const accepted = coordinator.request(action, priority);
+		if (!accepted) {
+			await liveConnection?.sendImmediate(rejectedMessage);
+			return;
+		}
+		if (controlBusy) {
+			ctx.abort();
+			await liveConnection?.sendImmediate(busyMessage);
+			return;
+		}
+		await coordinator.drainAndRecover(() => tryDispatch(ctx));
+	}
 
 	async function tryDispatch(ctx: ExtensionContext): Promise<void> {
 		if (!runtime || chatTurnInFlight || !ctx.isIdle() || coordinator.hasPending) return;

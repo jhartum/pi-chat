@@ -1,14 +1,6 @@
 /** Priority for a pending control action. */
 export type ActionPriority = "normal" | "supervised-restart";
 
-/** Return value from draining a pending action. */
-export interface DrainResult {
-	/** True when a pending action existed and was executed. */
-	didRun: boolean;
-	/** The shutdownRequested value at the time of drain completion. */
-	shutdownRequested: boolean;
-}
-
 /**
  * Manages a single deferred action with priority tracking for both queued
  * and currently-running state. A supervised-restart action can replace any
@@ -119,13 +111,6 @@ export class PendingAction {
 		return this.queuedAction !== undefined || this.runningAction !== undefined;
 	}
 
-	/** The priority of the currently running or queued action. */
-	get currentPriority(): ActionPriority {
-		if (this.runningPriority !== "normal") return this.runningPriority;
-		if (this.queuedPriority !== "normal") return this.queuedPriority;
-		return "normal";
-	}
-
 	/** Discard all queued and running state. */
 	clear(): void {
 		this.queuedAction = undefined;
@@ -137,13 +122,12 @@ export class PendingAction {
 
 /**
  * Production coordinator for deferred control actions. Wraps a PendingAction
- * with a shutdownRequested flag and provides a lifecycle method that owns
- * action drain and recovery dispatch.
+ * and provides a lifecycle method that owns action drain and recovery
+ * dispatch.
  *
  * Used by index.ts to unify control action lifecycle across agent_end and
  * agent_settled, ensuring that recovery dispatch runs exactly once after a
- * no-shutdown drain and is fully suppressed when shutdown was requested —
- * even when the action throws.
+ * drain, even when the action throws.
  *
  * Concurrent drainAndRecover calls are coalesced: only the call that
  * performs the actual drain work runs recovery. A concurrent call that
@@ -151,15 +135,6 @@ export class PendingAction {
  */
 export class ControlCoordinator {
 	private readonly pending = new PendingAction();
-	private _shutdownRequested = false;
-
-	get shutdownRequested(): boolean {
-		return this._shutdownRequested;
-	}
-
-	set shutdownRequested(value: boolean) {
-		this._shutdownRequested = value;
-	}
 
 	get hasPending(): boolean {
 		return this.pending.hasPending;
@@ -174,26 +149,15 @@ export class ControlCoordinator {
 	}
 
 	/**
-	 * Drain the pending action (if any). Always returns the drain result
-	 * including whether shutdown was requested.
-	 */
-	async drain(): Promise<DrainResult> {
-		const didRun = await this.pending.drain();
-		return { didRun, shutdownRequested: this._shutdownRequested };
-	}
-
-	/**
 	 * Drain pending actions and conditionally run the recovery callback.
 	 *
-	 * Recovery is invoked exactly when no shutdown was requested AND this
-	 * call was the one that performed actual drain work:
-	 * - After a normal (non-shutdown) action completes
-	 * - Even when an action throws, as long as shutdown was not set
+	 * Recovery is invoked exactly when this call was the one that performed
+	 * actual drain work:
+	 * - After a normal action completes
+	 * - Even when an action throws
 	 *
-	 * Recovery is suppressed when:
-	 * - Shutdown was requested (restart marker written successfully)
-	 * - A concurrent drainAndRecover already handled the work
-	 *   (this call found nothing to drain)
+	 * Recovery is suppressed when a concurrent drainAndRecover already
+	 * handled the work (this call found nothing to drain).
 	 *
 	 * If the action threw, the original error is rethrown after recovery.
 	 */
@@ -212,7 +176,7 @@ export class ControlCoordinator {
 
 		// Only recover if WE did the drain work. Concurrent drains that
 		// found nothing to execute skip recovery.
-		if (didWork && !this._shutdownRequested) {
+		if (didWork) {
 			try {
 				await recover();
 			} catch (recoverError) {
@@ -227,7 +191,6 @@ export class ControlCoordinator {
 
 	clear(): void {
 		this.pending.clear();
-		this._shutdownRequested = false;
 	}
 }
 
@@ -240,7 +203,7 @@ export class ControlCoordinator {
  * `hasPending` check, a compact command arriving during an agent_settled
  * handler (where Pi has already cleared `_isAgentRunActive` and thus
  * `ctx.isIdle()` returns true) would bypass the coordinator and execute
- * directly while a restart was running.
+ * directly while a control action was running.
  */
 export function isControlBusy(chatTurnInFlight: boolean, isIdle: boolean, hasPending: boolean): boolean {
 	return chatTurnInFlight || !isIdle || hasPending;

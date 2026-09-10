@@ -3,7 +3,7 @@ import type { InboundMessageInput } from "../core/runtime-types.js";
 import { chunkText } from "../render/chunking.js";
 import { formatMarkdownForService, maxMessageLength } from "../render/format.js";
 import { StreamingPreview } from "../render/streaming.js";
-import { subscribeTelegramBroker } from "../telegram-broker-client.js";
+import { type BrokerSubscriber, subscribeTelegramBroker } from "../telegram-broker-client.js";
 import { telegramFetch } from "../telegram-http.js";
 import type { TelegramTarget } from "../telegram-target.js";
 import {
@@ -66,14 +66,8 @@ async function callTelegramWithMarkdownFallback<T>(
 	}
 }
 
-interface TelegramUpdateSubscriber {
-	deliver(update: TelegramUpdate): Promise<void>;
-	onCaughtUp(): Promise<void>;
-	onError(error: Error): Promise<void>;
-}
-
 interface TelegramSubscriberRecord {
-	subscriber: TelegramUpdateSubscriber;
+	subscriber: BrokerSubscriber;
 	active: boolean;
 	queued: TelegramUpdate[];
 }
@@ -97,7 +91,7 @@ class TelegramUpdatePoller {
 
 	constructor(private readonly botToken: string) {}
 
-	async subscribe(subscriber: TelegramUpdateSubscriber): Promise<() => Promise<void>> {
+	async subscribe(subscriber: BrokerSubscriber): Promise<() => Promise<void>> {
 		if (this.stopped) throw new Error("Telegram update poller is stopped");
 		const record: TelegramSubscriberRecord = { subscriber, active: false, queued: [] };
 		this.subscribers.add(record);

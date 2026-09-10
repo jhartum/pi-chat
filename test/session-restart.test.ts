@@ -352,7 +352,7 @@ describe("PendingAction", () => {
 // ---------------------------------------------------------------------------
 
 describe("ControlCoordinator.drainAndRecover", () => {
-	it("calls recover after successful no-shutdown drain", async () => {
+	it("calls recover after successful drain", async () => {
 		const cc = new ControlCoordinator();
 		let recovered = false;
 
@@ -362,25 +362,10 @@ describe("ControlCoordinator.drainAndRecover", () => {
 			recovered = true;
 		});
 
-		assert.equal(recovered, true, "recover must be called after no-shutdown drain");
+		assert.equal(recovered, true, "recover must be called after drain");
 	});
 
-	it("does NOT call recover when shutdown was requested", async () => {
-		const cc = new ControlCoordinator();
-		let recovered = false;
-
-		cc.request(async () => {
-			cc.shutdownRequested = true;
-		}, "supervised-restart");
-
-		await cc.drainAndRecover(async () => {
-			recovered = true;
-		});
-
-		assert.equal(recovered, false, "recover must NOT be called when shutdown was requested");
-	});
-
-	it("calls recover even when action throws (no shutdown)", async () => {
+	it("calls recover even when action throws", async () => {
 		const cc = new ControlCoordinator();
 		let recovered = false;
 		let caught: unknown;
@@ -400,29 +385,6 @@ describe("ControlCoordinator.drainAndRecover", () => {
 		assert.equal(recovered, true, "recover must be called even when action throws");
 		assert.ok(caught instanceof Error, "action error must be rethrown");
 		assert.equal((caught as Error).message, "action failure");
-	});
-
-	it("skips recovery when action throws but shutdown was requested", async () => {
-		const cc = new ControlCoordinator();
-		let recovered = false;
-		let caught: unknown;
-
-		cc.request(async () => {
-			cc.shutdownRequested = true;
-			throw new Error("confirmation send failure");
-		}, "supervised-restart");
-
-		try {
-			await cc.drainAndRecover(async () => {
-				recovered = true;
-			});
-		} catch (e) {
-			caught = e;
-		}
-
-		assert.equal(recovered, false, "recover must NOT be called when shutdown was requested even on throw");
-		assert.ok(caught instanceof Error, "action error must be rethrown");
-		assert.equal((caught as Error).message, "confirmation send failure");
 	});
 
 	it("rethrows action error after recovery", async () => {
@@ -449,7 +411,7 @@ describe("ControlCoordinator.drainAndRecover", () => {
 			await d.promise;
 		}, "supervised-restart");
 
-		const drainPromise = cc.drain();
+		const drainPromise = cc.drainAndRecover(async () => {});
 
 		assert.equal(cc.hasPending, true, "hasPending must be true while restart runs");
 
@@ -570,49 +532,7 @@ describe("ControlCoordinator.drainAndRecover", () => {
 			["normal-start", "normal-throw", "restart-run", "recover"],
 			"restart must run after normal throws, then recovery",
 		);
-		assert.equal(recovered, true, "recovery must run (no shutdown was set)");
-	});
-
-	it("restart queued while normal throws with shutdown suppresses recovery", async () => {
-		const cc = new ControlCoordinator();
-		const normalStarted = deferred();
-		const beforeThrow = deferred();
-		const order: string[] = [];
-		let recovered = false;
-
-		// Normal blocks at beforeThrow so test can queue restart while it runs
-		cc.request(async () => {
-			order.push("normal-start");
-			normalStarted.resolve();
-			await beforeThrow.promise;
-			order.push("normal-throw");
-			throw new Error("normal failure");
-		}, "normal");
-
-		const darPromise = cc.drainAndRecover(async () => {
-			order.push("recover");
-			recovered = true;
-		});
-
-		await normalStarted.promise;
-
-		// Queue restart that sets shutdown while normal is blocked
-		cc.request(async () => {
-			order.push("restart-shutdown");
-			cc.shutdownRequested = true;
-		}, "supervised-restart");
-
-		// Release normal so it throws — then restart should run, recovery suppressed
-		beforeThrow.resolve();
-
-		await assert.rejects(() => darPromise, /normal failure/);
-
-		assert.deepEqual(
-			order,
-			["normal-start", "normal-throw", "restart-shutdown"],
-			"restart must run after normal throws, recovery suppressed",
-		);
-		assert.equal(recovered, false, "recovery must NOT run (shutdown was requested)");
+		assert.equal(recovered, true, "recovery must run after the chained restart");
 	});
 });
 
@@ -636,33 +556,28 @@ test("index.ts dispatches /chat-new as a command with expandPromptTemplates", as
 	assert.ok(!source.includes("PI_CHAT_NEW_SESSION_REQUEST_FILE"), "remote new must not use the supervisor marker file");
 });
 
-test("index.ts uses isControlBusy at all 3 control deferral sites", async () => {
+test("index.ts uses isControlBusy at all control deferral sites", async () => {
 	const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
 
-	// All 3 deferral sites must check coordinator.hasPending
+	// requestControl helper + chat-config restart site must check coordinator.hasPending
 	const controlBusyPattern = /chatTurnInFlight.*isIdle.*coordinator\.hasPending/g;
 	const matches = source.match(controlBusyPattern);
 	assert.ok(
-		matches && matches.length >= 3,
-		`isControlBusy must appear in at least 3 places, found ${matches?.length ?? 0}`,
+		matches && matches.length >= 2,
+		`isControlBusy must appear in at least 2 places, found ${matches?.length ?? 0}`,
 	);
 
-	// All 3 sites must import isControlBusy or inline the condition
-	assert.ok(
-		source.includes("isControlBusy") || source.includes("chatTurnInFlight.*coordinator.hasPending"),
-		"index.ts must check coordinator.hasPending in busy deferral",
-	);
+	assert.ok(source.includes("isControlBusy"), "index.ts must check coordinator.hasPending in busy deferral");
 });
 
 test("index.ts checks accepted before ctx.abort and sends truthful messages", async () => {
 	const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
 
-	// Each deferral site must declare `const accepted = coordinator.request(...)` BEFORE ctx.abort()
-	// Pattern: coordinator.request followed by accepted before ctx.abort
+	// requestControl helper + chat-config restart site must gate admission on `accepted`
 	const requestThenAccepted = source.match(/const accepted = coordinator\.request\(/g);
 	assert.ok(
-		requestThenAccepted && requestThenAccepted.length >= 3,
-		`coordinator.request must assign accepted at least 3 times, found ${requestThenAccepted?.length ?? 0}`,
+		requestThenAccepted && requestThenAccepted.length >= 2,
+		`coordinator.request must assign accepted at least 2 times, found ${requestThenAccepted?.length ?? 0}`,
 	);
 
 	// Rejection messages must exist
@@ -684,7 +599,7 @@ test("idle remote controls enter the coordinator before asynchronous work", asyn
 		"idle remote new must not run outside the coordinator dispatch gate",
 	);
 	assert.ok(
-		(source.match(/coordinator\.drainAndRecover\(/g)?.length ?? 0) >= 5,
+		(source.match(/coordinator\.drainAndRecover\(/g)?.length ?? 0) >= 4,
 		"idle compact and new must drain through the same tested coordinator lifecycle",
 	);
 });
@@ -702,11 +617,14 @@ test("index.ts uses drainAndRecover at all 3 lifecycle sites", async () => {
 	assert.ok(!rawDrainInLifecycle, "coordinator.drain() must not be called directly in lifecycle handlers");
 
 	assert.ok(
-		source.includes('coordinator.request(queueNewSession, "supervised-restart"'),
+		/requestControl\([\s\S]*?queueNewSession,[\s\S]*?"supervised-restart"/u.test(source),
 		"remote new must use supervised-restart priority",
 	);
 
-	assert.ok(source.includes('coordinator.request(runCompact, "normal"'), "compact must use normal priority");
+	assert.ok(
+		/requestControl\([\s\S]*?runCompact,[\s\S]*?"normal"/u.test(source),
+		"compact must use normal priority",
+	);
 	assert.ok(
 		source.includes('coordinator.request(action, "normal"'),
 		"chat-config sandbox restart must use normal priority",
